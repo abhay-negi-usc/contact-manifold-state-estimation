@@ -2,6 +2,7 @@ import torch
 import math 
 RAD2DEG = 180.0 / math.pi
 
+# TODO: check if this is consistent with rotation convention used in cicp 
 def torch_matrix_to_pose_xyzabc(matrix):
     """Differentiable version of 4x4 matrix to pose (x, y, z, rz, ry, rx) using ZYX Euler angles"""
     translation = matrix[:, :3, 3]
@@ -18,6 +19,7 @@ def torch_matrix_to_pose_xyzabc(matrix):
     pose = torch.cat([translation, euler_deg], dim=-1)
     return pose
 
+# TODO: check if this is consistent with rotation convention used in cicp 
 def torch_pose_xyzabc_to_matrix(pose):
     """Differentiable version of pose (x, y, z, rz, ry, rx) to 4x4 matrix using ZYX Euler angles"""
     batch_size = pose.shape[0]
