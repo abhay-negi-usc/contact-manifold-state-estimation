@@ -36,6 +36,15 @@
         <mesh name="peg18" file="../assets/CAD/cross_peg_real/decomposition/Body18.stl" />
         <mesh name="peg19" file="../assets/CAD/cross_peg_real/decomposition/Body19.stl" />
         <mesh name="peg20" file="../assets/CAD/cross_peg_real/decomposition/Body20.stl" />
+        <mesh name="peg21" file="../assets/CAD/cross_peg_real/decomposition/Body11.stl" />
+        <mesh name="peg22" file="../assets/CAD/cross_peg_real/decomposition/Body12.stl" />
+        <mesh name="peg23" file="../assets/CAD/cross_peg_real/decomposition/Body13.stl" />
+        <mesh name="peg24" file="../assets/CAD/cross_peg_real/decomposition/Body14.stl" />
+        <mesh name="peg25" file="../assets/CAD/cross_peg_real/decomposition/Body15.stl" />
+        <mesh name="peg26" file="../assets/CAD/cross_peg_real/decomposition/Body16.stl" />
+        <mesh name="peg27" file="../assets/CAD/cross_peg_real/decomposition/Body17.stl" />
+        <mesh name="peg28" file="../assets/CAD/cross_peg_real/decomposition/Body18.stl" />
+        <mesh name="peg29" file="../assets/CAD/cross_peg_real/decomposition/Body19.stl" />
 
         <mesh name="hole1" file="../assets/CAD/cross_hole_real/decomposition/Body1.stl" />
         <mesh name="hole2" file="../assets/CAD/cross_hole_real/decomposition/Body2.stl" />
@@ -108,6 +117,15 @@
             <geom type="mesh" mesh="peg18" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
             <geom type="mesh" mesh="peg19" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
             <geom type="mesh" mesh="peg20" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg21" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg22" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg23" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg24" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg25" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg26" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg27" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg28" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg29" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
 
             <joint name="trans_x" type="slide" axis="1 0 0" limited="false"/>
             <joint name="trans_y" type="slide" axis="0 1 0" limited="false"/>

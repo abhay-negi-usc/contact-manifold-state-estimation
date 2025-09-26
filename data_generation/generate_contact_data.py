@@ -45,7 +45,7 @@ else:
     else:
         dir_results = base_output_dir + "/"
 
-xml_path = f"./mujoco_environments/{geometry}_env.xml" 
+xml_path = f"./data_generation/mujoco_environments/{geometry}_env.xml" 
 peg_length = 0.025 
 
 # Calculate trials for this worker
