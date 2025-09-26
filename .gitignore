@@ -1,0 +1,13 @@
+data_generation/data
+data_generation/__pycache__
+data_generation/configs/__pycache__
+data_generation/configs/*.pyc
+data_generation/models/__pycache__
+data_generation/models/*.pyc
+data_generation/scripts/__pycache__
+data_generation/scripts/*.pyc
+data_generation/utils/__pycache__
+data_generation/utils/*.pyc
+__pycache__
+*.pyc
+.DS_Store

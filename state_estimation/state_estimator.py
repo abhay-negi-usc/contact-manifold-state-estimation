@@ -138,6 +138,130 @@ def estimate_holePose_and_inHandPose(
 
     return tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history
 
+def estimate_holePose(
+        contact_model, 
+        observations, 
+        config, 
+        max_it=10_000, 
+        lr=1e-5, 
+        optimizer_type='adam', 
+        gradient_noise_std=0.02, 
+        max_samples=None, 
+        save_results=False,
+        convergence_tolerance=1e-1,
+        convergence_window=25,
+        param_change_tolerance=2e-0
+    ):
+    """
+    Estimate only the hole pose offset (tf_H_h) without optimizing the in-hand pose.
+    The peg frame remains fixed relative to the end effector.
+    
+    Args:
+        convergence_tolerance: Threshold for loss change to consider convergence
+        convergence_window: Number of iterations to check for convergence
+        param_change_tolerance: Threshold for parameter change to consider convergence
+    """
+    device = config['device']
+    pose_h_p = torch.tensor(observations, dtype=torch.float32, device=device) if isinstance(observations, np.ndarray) else observations.to(device)
+    
+    # Initialize hole pose offset
+    initial_hole_pose = np.zeros((1,6), dtype=np.float32) # tf_H_h 
+    pose_H_h = torch.nn.Parameter(torch.tensor(initial_hole_pose, dtype=torch.float32, device=device)) # tf_H_h 
+    
+    # Fixed in-hand pose (no optimization)
+    fixed_inhand_pose = np.zeros((1,6), dtype=np.float32) # tf_p_P (identity transform)
+    pose_p_P = torch.tensor(fixed_inhand_pose, dtype=torch.float32, device=device)
+
+    B = pose_h_p.shape[0] # batch size 
+    
+    if max_samples is not None and max_samples < B:
+        selected_idx = torch.randperm(pose_h_p.shape[0])[:max_samples]
+        pose_h_p = pose_h_p[selected_idx]
+    B = pose_h_p.shape[0] # batch size 
+
+    parameters = [pose_H_h]  # Only optimize hole pose
+
+    FM = ForwardModel(contact_model=contact_model).to(device)
+
+    if optimizer_type.lower() == 'adam':
+        optimizer = torch.optim.Adam(parameters, lr=lr, betas=(0.0, 0.0), eps=1e-12, weight_decay=0.0)
+    elif optimizer_type.lower() == 'sgd':
+        optimizer = torch.optim.SGD(parameters, lr=lr)
+
+    pose_H_h_history = [pose_H_h.detach().clone()]  # keep on device
+    loss_history = []
+
+    use_combined_loss = False
+    
+    # Convergence tracking variables
+    convergence_met = False
+    
+    for iter in range(max_it):
+        # Store previous parameters for convergence check
+        prev_pose_H_h = pose_H_h.detach().clone()
+        
+        optimizer.zero_grad()
+        loss_total, loss_position, loss_rotation = FM.forward(pose_H_h=pose_H_h, pose_h_p=pose_h_p, pose_p_P=pose_p_P)
+        loss = loss_total if use_combined_loss else loss_position
+        loss.backward()
+
+        if gradient_noise_std > 0:
+            for p in parameters:
+                if p.grad is not None:
+                    p.grad += torch.randn_like(p.grad) * gradient_noise_std
+
+        optimizer.step()
+
+        pose_H_h_history.append(pose_H_h.detach().clone())
+        loss_history.append(loss.item())
+
+        # Early stopping based on absolute loss threshold
+        if loss.item() < 1e-6:
+            print(f"Early stopping at iteration {iter}, loss: {loss.item():.6f}")
+            convergence_met = True
+            break
+        
+        # Convergence check based on loss change and parameter change
+        if iter >= convergence_window:
+            # Check loss convergence over the window
+            recent_losses = loss_history[-convergence_window:]
+            loss_std = np.std(recent_losses)
+            loss_change = abs(recent_losses[-1] - recent_losses[0])
+            
+            # Check parameter change
+            param_change = torch.norm(pose_H_h - prev_pose_H_h).item()
+            
+            # Check if both loss and parameters have converged
+            if (loss_std < convergence_tolerance and 
+                loss_change < convergence_tolerance and 
+                param_change < param_change_tolerance):
+                print(f"Convergence achieved at iteration {iter}")
+                print(f"  Loss std over {convergence_window} iterations: {loss_std:.2e}")
+                print(f"  Loss change: {loss_change:.2e}")
+                print(f"  Parameter change: {param_change:.2e}")
+                convergence_met = True
+                break
+    
+    if not convergence_met:
+        print(f"Maximum iterations ({max_it}) reached without convergence")
+        if len(loss_history) >= convergence_window:
+            recent_losses = loss_history[-convergence_window:]
+            loss_std = np.std(recent_losses)
+            loss_change = abs(recent_losses[-1] - recent_losses[0])
+            param_change = torch.norm(pose_H_h - pose_H_h_history[-2]).item() if len(pose_H_h_history) >= 2 else 0
+            print(f"  Final loss std: {loss_std:.2e}")
+            print(f"  Final loss change: {loss_change:.2e}")
+            print(f"  Final parameter change: {param_change:.2e}")
+
+    # Move to CPU only once at the end
+    pose_H_h_history_cpu = [p.cpu().numpy() for p in pose_H_h_history]
+
+    final_hole_pose = pose_H_h_history[-1].detach().cpu().numpy()
+    pose_H_h_est = final_hole_pose  # or any processing if needed
+    tf_H_h_est = torch_pose_xyzabc_to_matrix(torch.tensor(final_hole_pose, dtype=torch.float32)).cpu().numpy()  # Convert to matrix form
+
+    return tf_H_h_est, pose_H_h_est, pose_H_h_history, loss_history
+
 def read_observation(observation_path):
     tf_H_P = np.load(observation_path, allow_pickle=True)
     return tf_H_P 
@@ -256,7 +380,8 @@ def main():
     tf_H_P = read_observation(config['observation_path'])  
     tf_h_p, tf_H_h, tf_P_p = offset_observation(
         max_hole_pose_offsets=np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0]), 
-        max_in_hand_pose_offsets=np.array([0, 10.0, 10.0, 0, 0, 10.0]),
+        # max_in_hand_pose_offsets=np.array([0, 10.0, 10.0, 0, 0, 10.0]),
+        max_in_hand_pose_offsets=np.array([0, 0, 0, 0, 0, 0]),
         observation=tf_H_P, 
         set_max_offsets=True
     )  # Offset the observation
@@ -264,34 +389,74 @@ def main():
     pose_P_p = torch_matrix_to_pose_xyzabc(torch.tensor(tf_P_p.reshape(1,4,4), dtype=torch.float32)).cpu().numpy()  
 
     print(f"Initial pose_H_h: {pose_H_h}")
-    pose_h_p = torch_matrix_to_pose_xyzabc(torch.tensor(tf_h_p, dtype=torch.float32)).cpu().numpy()  
-
+    print(f"Initial pose_P_p: {pose_P_p}")
+    pose_h_p = torch_matrix_to_pose_xyzabc(torch.tensor(tf_h_p, dtype=torch.float32)).cpu().numpy()
+    
     cpm = ContactPoseManifold(geometry="gear") 
     cpm.load_model_from_path(config['contact_model_path'])
 
-    ret = estimate_holePose_and_inHandPose(
+    # ret = estimate_holePose_and_inHandPose(
+    #     contact_model=cpm,  
+    #     observations=pose_h_p,
+    #     config=config,
+    #     max_samples=10000,
+    #     max_it=1000, 
+    #     lr=1e-2, 
+    #     optimizer_type='adam', 
+    # ) 
+    # tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history = ret 
+    # tf_H_h_error, pose_H_h_error, tf_H_h_history, tf_H_h_error_history, pose_H_h_error_history, tf_P_p_error, pose_P_p_error, tf_P_p_history, tf_P_p_error_history, pose_P_p_error_history = compute_errors(tf_H_h, pose_H_h_history, tf_H_h_est, tf_P_p, pose_P_p_history, tf_P_p_est) 
+    # print(f"Initial hole pose error: {pose_H_h}")
+    # print(f"Final hole pose est: {pose_H_h_est}")
+    # print(f"Final pose error: {pose_H_h_error}") 
+    # print(f"Initial in-hand pose error: {pose_P_p}")
+    # print(f"Final in-hand pose est: {pose_P_p_est}")
+    # print(f"Final in-hand pose error: {pose_P_p_error}")
+    # plot_history(pose_H_h_error_history, pose_P_p_error_history, loss_history) 
+
+    print("\n" + "="*50)
+    print("Testing estimate_holePose() - hole pose only estimation")
+    print("="*50)
+    
+    # Test the new estimate_holePose function (only hole pose estimation)
+    ret_hole_only = estimate_holePose(
         contact_model=cpm,  
         observations=pose_h_p,
         config=config,
-        max_samples=10000,
+        max_samples=None,
         max_it=1000, 
-        lr=1e-2, 
+        lr=1e-1, 
         optimizer_type='adam', 
     ) 
-    tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history = ret 
-
-    tf_H_h_error, pose_H_h_error, tf_H_h_history, tf_H_h_error_history, pose_H_h_error_history, tf_P_p_error, pose_P_p_error, tf_P_p_history, tf_P_p_error_history, pose_P_p_error_history = compute_errors(tf_H_h, pose_H_h_history, tf_H_h_est, tf_P_p, pose_P_p_history, tf_P_p_est) 
-
-    print(f"Initial hole pose error: {pose_H_h}")
-    print(f"Final hole pose est: {pose_H_h_est}")
-    print(f"Final pose error: {pose_H_h_error}") 
-
-
-    print(f"Initial in-hand pose error: {pose_P_p}")
-    print(f"Final in-hand pose est: {pose_P_p_est}")
-    print(f"Final in-hand pose error: {pose_P_p_error}")
-
-    plot_history(pose_H_h_error_history, pose_P_p_error_history, loss_history) 
+    tf_H_h_est_hole_only, pose_H_h_est_hole_only, pose_H_h_history_hole_only, loss_history_hole_only = ret_hole_only
+    
+    # Compute errors for hole-only estimation
+    tf_H_h_error_hole_only = tf_H_h @ np.linalg.inv(tf_H_h_est_hole_only)  
+    pose_H_h_error_hole_only = torch_matrix_to_pose_xyzabc(torch.tensor(tf_H_h_error_hole_only, dtype=torch.float32)).cpu().numpy()
+    
+    print(f"Hole-only estimation - Initial hole pose error: {pose_H_h}")
+    print(f"Hole-only estimation - Final hole pose est: {pose_H_h_est_hole_only}")
+    print(f"Hole-only estimation - Final hole pose error: {pose_H_h_error_hole_only}")
+    
+    # # Plot loss history comparison
+    # plt.figure(figsize=(12, 5))
+    # plt.subplot(1, 2, 1)
+    # plt.plot(loss_history, label='Joint estimation (hole + in-hand)')
+    # plt.xlabel('Iteration')
+    # plt.ylabel('Loss')
+    # plt.title('Joint Estimation Loss History')
+    # plt.legend()
+    # plt.grid()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(loss_history_hole_only, label='Hole-only estimation')
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Hole-only Estimation Loss History')
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
-    main() 
+    main()

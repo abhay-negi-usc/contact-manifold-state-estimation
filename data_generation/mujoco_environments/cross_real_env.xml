@@ -1,0 +1,137 @@
+<mujoco>
+    <option timestep=".001">
+        <flag energy="enable" contact="enable" override="enable"/>
+    </option>
+
+    <default>
+        <default class="hole_geom">
+            <geom xyaxes="1 0 0 0 1 0" rgba="0 0 1 0.2"/>
+        </default>
+        <site size="0.0002" />
+        <geom friction="10000" />
+    </default>
+
+    <visual>
+        <global offwidth="960" offheight="720"/>
+    </visual>
+
+    <asset>
+        <mesh name="peg1" file="../assets/CAD/cross_peg_real/decomposition/Body1.stl" />
+        <mesh name="peg2" file="../assets/CAD/cross_peg_real/decomposition/Body2.stl" />
+        <mesh name="peg3" file="../assets/CAD/cross_peg_real/decomposition/Body3.stl" />
+        <mesh name="peg4" file="../assets/CAD/cross_peg_real/decomposition/Body4.stl" />
+        <mesh name="peg5" file="../assets/CAD/cross_peg_real/decomposition/Body5.stl" />
+        <mesh name="peg6" file="../assets/CAD/cross_peg_real/decomposition/Body6.stl" />
+        <mesh name="peg7" file="../assets/CAD/cross_peg_real/decomposition/Body7.stl" />
+        <mesh name="peg8" file="../assets/CAD/cross_peg_real/decomposition/Body8.stl" />
+        <mesh name="peg9" file="../assets/CAD/cross_peg_real/decomposition/Body9.stl" />
+        <mesh name="peg10" file="../assets/CAD/cross_peg_real/decomposition/Body10.stl" />
+        <mesh name="peg11" file="../assets/CAD/cross_peg_real/decomposition/Body11.stl" />
+        <mesh name="peg12" file="../assets/CAD/cross_peg_real/decomposition/Body12.stl" />
+        <mesh name="peg13" file="../assets/CAD/cross_peg_real/decomposition/Body13.stl" />
+        <mesh name="peg14" file="../assets/CAD/cross_peg_real/decomposition/Body14.stl" />
+        <mesh name="peg15" file="../assets/CAD/cross_peg_real/decomposition/Body15.stl" />
+        <mesh name="peg16" file="../assets/CAD/cross_peg_real/decomposition/Body16.stl" />
+        <mesh name="peg17" file="../assets/CAD/cross_peg_real/decomposition/Body17.stl" />
+        <mesh name="peg18" file="../assets/CAD/cross_peg_real/decomposition/Body18.stl" />
+        <mesh name="peg19" file="../assets/CAD/cross_peg_real/decomposition/Body19.stl" />
+        <mesh name="peg20" file="../assets/CAD/cross_peg_real/decomposition/Body20.stl" />
+
+        <mesh name="hole1" file="../assets/CAD/cross_hole_real/decomposition/Body1.stl" />
+        <mesh name="hole2" file="../assets/CAD/cross_hole_real/decomposition/Body2.stl" />
+        <mesh name="hole3" file="../assets/CAD/cross_hole_real/decomposition/Body3.stl" />
+        <mesh name="hole4" file="../assets/CAD/cross_hole_real/decomposition/Body4.stl" />
+        <mesh name="hole5" file="../assets/CAD/cross_hole_real/decomposition/Body5.stl" />
+        <mesh name="hole6" file="../assets/CAD/cross_hole_real/decomposition/Body6.stl" />
+        <mesh name="hole7" file="../assets/CAD/cross_hole_real/decomposition/Body7.stl" />
+        <mesh name="hole8" file="../assets/CAD/cross_hole_real/decomposition/Body8.stl" />
+        <mesh name="hole9" file="../assets/CAD/cross_hole_real/decomposition/Body9.stl" />
+        <mesh name="hole10" file="../assets/CAD/cross_hole_real/decomposition/Body10.stl" />
+        <mesh name="hole11" file="../assets/CAD/cross_hole_real/decomposition/Body11.stl" />
+        <mesh name="hole12" file="../assets/CAD/cross_hole_real/decomposition/Body12.stl" />
+        <mesh name="hole13" file="../assets/CAD/cross_hole_real/decomposition/Body13.stl" />
+        <mesh name="hole14" file="../assets/CAD/cross_hole_real/decomposition/Body14.stl" />
+    
+    </asset>
+
+    <worldbody>
+        <site name="world" pos="0 0 0" size="0.0001" />
+        
+        <light name="top-light" pos="0.0 0.0 0.5" mode="targetbodycom" target="peg" castshadow="false" ambient=".8 .8 .8" />
+
+        <body name="hole" pos="0 0 0">
+
+            <camera name="track" mode="track" pos="-0.050 -0.050 0.025" euler="60 -45 -30" fovy="69.4"/>
+            
+            <inertial pos="0 0 0" mass="0.1" diaginertia="0.1 0.1 0.1" />
+
+            <geom type="mesh" mesh="hole1" class="hole_geom"/>
+            <geom type="mesh" mesh="hole2" class="hole_geom"/>
+            <geom type="mesh" mesh="hole3" class="hole_geom"/>
+            <geom type="mesh" mesh="hole4" class="hole_geom"/>
+            <geom type="mesh" mesh="hole5" class="hole_geom"/>
+            <geom type="mesh" mesh="hole6" class="hole_geom"/>
+            <geom type="mesh" mesh="hole7" class="hole_geom"/>
+            <geom type="mesh" mesh="hole8" class="hole_geom"/>
+            <geom type="mesh" mesh="hole9" class="hole_geom"/>
+            <geom type="mesh" mesh="hole10" class="hole_geom"/>
+            <geom type="mesh" mesh="hole11" class="hole_geom"/>
+            <geom type="mesh" mesh="hole12" class="hole_geom"/>
+            <geom type="mesh" mesh="hole13" class="hole_geom"/>
+            <geom type="mesh" mesh="hole14" class="hole_geom"/>
+
+        </body>
+
+        <body name="peg" pos="0 0 0">
+            <inertial pos="0 0 0" mass="1.0" diaginertia="0.1 0.1 0.1" />
+
+            <site name="peg/origin" pos="0 0 0" />
+            <site name="peg/sensor" pos="0 0 0" />
+
+            <geom type="mesh" mesh="peg1" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg2" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg3" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg4" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg5" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg6" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg7" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg8" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg9" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg10" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg11" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg12" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg13" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg14" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg15" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg16" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg17" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg18" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg19" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+            <geom type="mesh" mesh="peg20" xyaxes="1 0 0 0 1 0" rgba="1 0 0 0.8"/>
+
+            <joint name="trans_x" type="slide" axis="1 0 0" limited="false"/>
+            <joint name="trans_y" type="slide" axis="0 1 0" limited="false"/>
+            <joint name="trans_z" type="slide" axis="0 0 1" limited="false"/>
+            <joint name="hinge_x" type="hinge" axis="1 0 0" limited="false"/>
+            <joint name="hinge_y" type="hinge" axis="0 1 0" limited="false"/>
+            <joint name="hinge_z" type="hinge" axis="0 0 1" limited="false"/>
+        </body>
+
+    </worldbody>
+
+    <actuator>
+        <position name="x" forcelimited="true" forcerange="-20 20" joint="trans_x" kp="100000" kv="100" />
+        <position name="y" forcelimited="true" forcerange="-20 20" joint="trans_y" kp="100000" kv="100" />
+        <position name="z" forcelimited="true" forcerange="-20 20" joint="trans_z" kp="100000" kv="100" />
+        <position name="rx" forcelimited="true" forcerange="-5 5" joint="hinge_x" kp="50" kv="5" />
+        <position name="ry" forcelimited="true" forcerange="-5 5" joint="hinge_y" kp="50" kv="5"/>
+        <position name="rz" forcelimited="true" forcerange="-5 5" joint="hinge_z" kp="50" kv="5"/>
+    </actuator> 
+
+    <sensor>
+        <force name="force_sensor" site="peg/sensor" />
+        <torque name="torque_sensor" site="peg/sensor" />
+        <framepos name="peg_pos" objtype="site" objname="peg/origin"/>
+        <framequat name="peg_quat" objtype="site" objname="peg/origin"/>
+    </sensor>
+</mujoco>
