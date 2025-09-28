@@ -8,6 +8,8 @@ data_generation/scripts/__pycache__
 data_generation/scripts/*.pyc
 data_generation/utils/__pycache__
 data_generation/utils/*.pyc
+utils/__pycache__
+utils/*.pyc
 __pycache__
 *.pyc
 .DS_Store

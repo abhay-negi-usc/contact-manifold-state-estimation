@@ -1,3 +1,5 @@
+# usage: python -m data_generation.run_parallel_generation --num-workers 20 --total-trials 10000000
+
 import mujoco 
 import mediapy as media 
 import numpy as np 
@@ -9,7 +11,8 @@ import os
 import cv2
 import argparse
 import time
-import random 
+import random
+import json 
 
 # Parse command line arguments for parallel execution
 def parse_args():
@@ -22,15 +25,39 @@ def parse_args():
                        help='Number of trials per worker (default: auto-split total trials)')
     parser.add_argument('--output-suffix', type=str, default='',
                        help='Additional suffix for output directory (default: empty)')
+    parser.add_argument('--progress-file', type=str, default=None,
+                       help='File to track progress across workers (default: None)')
     return parser.parse_args()
 
 args = parse_args()
 
+def update_progress(worker_id, completed_trials, progress_file):
+    """Update the shared progress file with current worker progress."""
+    if progress_file is None:
+        return
+    
+    try:
+        # Read current progress
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r') as f:
+                progress_data = json.load(f)
+        else:
+            progress_data = {}
+        
+        # Update this worker's progress
+        progress_data[str(worker_id)] = completed_trials
+        
+        # Write back to file
+        with open(progress_file, 'w') as f:
+            json.dump(progress_data, f)
+    except Exception as e:
+        # Don't fail the main process if progress tracking fails
+        pass
+
 # hyperparameters 
-geometry = "cross_real" # "extrusion" "cross" "plug_3_pin" 
+geometry = "cross_real" 
 
 # Create unique output directory for this worker
-# base_output_dir = f"./data/{geometry}_data"
 base_output_dir = f"/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/{geometry}_data/{geometry}_data"
 if args.num_workers > 1:
     # Use worker-specific subdirectory for parallel execution
@@ -45,7 +72,7 @@ else:
     else:
         dir_results = base_output_dir + "/"
 
-xml_path = f"./data_generation/mujoco_environments/{geometry}_env.xml" 
+xml_path = f"./mujoco_environments/{geometry}_env.xml" 
 peg_length = 0.025 
 
 # Calculate trials for this worker
@@ -102,6 +129,11 @@ model.vis.scale.contactheight = 0.02
 model.vis.scale.forcewidth = 0.05
 model.vis.map.force = 0.3
 model.opt.gravity = (0,0,0)
+
+# Initialize progress tracking
+update_progress(args.worker_id, 0, args.progress_file)
+
+print(f"Worker {args.worker_id} starting with {num_trials} trials...")
 
 for idx_trial in range(num_trials): 
     # Calculate global trial index for unique naming
@@ -221,4 +253,11 @@ for idx_trial in range(num_trials):
         with open(dir_results + f"/pkl/trial_{global_trial_idx}.pkl", 'wb') as f: 
             pickle.dump(data_dict, f) 
         
-        print(f"Worker {args.worker_id}: Trial {idx_trial}/{num_trials} (global: {global_trial_idx}) complete.") 
+        # Update progress after each trial (or every 10 trials for performance)
+        if (idx_trial + 1) % 10 == 0 or idx_trial == num_trials - 1:
+            update_progress(args.worker_id, idx_trial + 1, args.progress_file)
+        
+        if (idx_trial + 1) % 100 == 0 or idx_trial == num_trials - 1:
+            print(f"Worker {args.worker_id}: Trial {idx_trial + 1}/{num_trials} (global: {global_trial_idx + 1}) complete.")
+
+print(f"Worker {args.worker_id} completed all {num_trials} trials successfully!")

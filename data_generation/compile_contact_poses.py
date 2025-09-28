@@ -5,13 +5,14 @@ import glob
 import os 
 import pickle 
 from scipy.spatial.transform import Rotation as R 
-import random 
+import random
+from tqdm import tqdm 
 
 # go through each timestep of each trial of data 
 
 geometry = "cross_real" 
 
-dir_results = f"/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/{geometry}_data/" 
+dir_results = f"/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/{geometry}_data/{geometry}_data_merged" 
 dir_pkl = dir_results + "/pkl" 
 pkl_files = sorted(glob.glob(os.path.join(dir_pkl, "*.pkl")), key=os.path.getmtime)
 output_file = f"{geometry}_contact_poses_mujoco.csv"
@@ -23,8 +24,9 @@ if not os.path.exists(dir_save):
 # list of all contact state history 
 N_trials = 250_000 # FIXME: program gets killed if N_trials is 1_000_000 
 N_trials = len(pkl_files) if len(pkl_files) < N_trials else N_trials
+print(f"Processing {N_trials} trials out of {len(pkl_files)} available.")
 # N_max = 1_000_000_000 
-N_max = 10_000 
+N_max = 10_000_000 
 pkl_files = [pkl_files[i] for i in random.sample(range(len(pkl_files)), N_trials)]
 pose_boundary_list = [] 
 
@@ -32,6 +34,9 @@ hole_length = 0.025 # m
 hole_diameter = 0.026 # m
 upper_z_limit = hole_length + 0.001 # m, 1mm above the hole top surface
 xy_limit = hole_diameter/2 + 0.0001 # m, 0.1mm outside the hole diameter 
+
+# Create progress bar to track pose_boundary_list length up to N_max
+pbar = tqdm(total=N_max, desc="Collecting contact poses", unit="pose")
 
 for i, pkl_file in enumerate(pkl_files): 
 
@@ -45,29 +50,24 @@ for i, pkl_file in enumerate(pkl_files):
 
     # check if there is contact within the hole area, if so, add the pose to the list 
     for j, contact_pos_j in enumerate(contact_pos): # iterate through each time step 
+        valid_contact = True 
         if len(contact_pos_j) > 0: # if there is contact 
-            for k, contact_pos_hole_frame in enumerate(contact_pos_j): # iterate through each contact at current time step 
-                if geometry == "cross_real":
-                    if contact_pos_hole_frame[2] < upper_z_limit and max(abs(contact_pos_hole_frame[:2])) < xy_limit: # if contact is below the surface and within hole area 
-                        peg_pose = state_hist[j, 1:8] 
-                        pose_boundary_list.append(peg_pose) 
-                        print(f"Added pose at j: {j}, k: {k}, contact_pos: {contact_pos_hole_frame}, peg_pose: {peg_pose}")
-                        
-                        # debug: checking where contact is occurring 
-                        if peg_pose[0] == 0 and peg_pose[1] == 0 and peg_pose[3] == 1 and peg_pose[4] == 0 and peg_pose[5] == 0 and peg_pose[6] == 0: 
-                            print("Contact at center of hole, likely at bottom surface contact.")
-                            import pdb; pdb.set_trace() 
-
+            if geometry == "cross_real":
+                for k, contact_pos_hole_frame in enumerate(contact_pos_j): # iterate through each contact at current time step 
+                    if contact_pos_hole_frame[2] > upper_z_limit or max(abs(contact_pos_hole_frame[:2])) > xy_limit: # if contact is not below the surface or not within hole area 
+                        valid_contact = False 
                         continue # don't need to check pose again 
-    # print progress rate every 1% of total iterations 
-    if (i+1) % np.floor(len(pkl_files)/100) == 0: 
-        print(f"Completion Progress: {i+1}/{len(pkl_files)}")  
+                if valid_contact:
+                    peg_pose = state_hist[j, 1:8] 
+                    pose_boundary_list.append(peg_pose)
+                    pbar.update(1)  # Update progress bar when a new pose is added
 
     if len(pose_boundary_list) > N_max: 
         print(f"Reached maximum data points of {N_max}. Stopping further processing.")
         break
 
-import pdb; pdb.set_trace() 
+# Close the progress bar
+pbar.close()
 
 # convert list to dataframe 
 pose_boundary_df = pd.DataFrame(pose_boundary_list, columns=['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz']) 

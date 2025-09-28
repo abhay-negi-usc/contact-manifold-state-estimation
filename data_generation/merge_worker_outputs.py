@@ -11,9 +11,9 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Merge output from parallel workers')
-    parser.add_argument('--base-dir', type=str, default='./data',
+    parser.add_argument('--base-dir', type=str, default='/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/cross_real_data/',
                        help='Base directory containing worker outputs (default: ./data)')
-    parser.add_argument('--output-dir', type=str, default='./data/cross_real_data_merged',
+    parser.add_argument('--output-dir', type=str, default='/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/cross_real_data/cross_real_data_merged',
                        help='Output directory for merged results (default: ./data/cross_real_data_merged)')
     parser.add_argument('--worker-pattern', type=str, default='*_worker_*',
                        help='Pattern to match worker directories (default: *_worker_*)')

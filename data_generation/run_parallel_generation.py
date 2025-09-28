@@ -9,7 +9,10 @@ import time
 import os
 import signal
 import sys
+import threading
+import json
 from pathlib import Path
+from tqdm import tqdm
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run parallel contact data generation')
@@ -22,6 +25,34 @@ def parse_args():
     parser.add_argument('--dry-run', action='store_true',
                        help='Print commands without executing them')
     return parser.parse_args()
+
+def monitor_progress(progress_file, total_trials, pbar, stop_event):
+    """Monitor progress from all workers and update the progress bar."""
+    last_total = 0
+    
+    while not stop_event.is_set():
+        try:
+            if os.path.exists(progress_file):
+                with open(progress_file, 'r') as f:
+                    progress_data = json.load(f)
+                
+                # Sum up progress from all workers
+                current_total = sum(progress_data.values())
+                
+                # Update progress bar
+                if current_total > last_total:
+                    pbar.update(current_total - last_total)
+                    last_total = current_total
+                    
+                # Check if we're done
+                if current_total >= total_trials:
+                    break
+                    
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            # Progress file doesn't exist yet or is corrupted, continue waiting
+            pass
+        
+        time.sleep(0.5)  # Update every 0.5 seconds
 
 def main():
     args = parse_args()
@@ -36,6 +67,15 @@ def main():
     if remaining_trials > 0:
         print(f"First {remaining_trials} workers will process {trials_per_worker + 1} trials")
     print()
+    
+    # Create progress tracking file
+    script_dir = Path(__file__).parent
+    progress_file = script_dir / "worker_progress.json"
+    
+    # Initialize progress file
+    if not args.dry_run:
+        with open(progress_file, 'w') as f:
+            json.dump({}, f)
     
     processes = []
     
@@ -52,7 +92,8 @@ def main():
                 'python', 'generate_contact_data.py',
                 '--worker-id', str(worker_id),
                 '--num-workers', str(args.num_workers),
-                '--trials-per-worker', str(worker_trials)
+                '--trials-per-worker', str(worker_trials),
+                '--progress-file', str(progress_file)
             ]
             
             if args.output_suffix:
@@ -63,7 +104,6 @@ def main():
             
             if not args.dry_run:
                 # Change to the data_generation directory
-                script_dir = Path(__file__).parent
                 process = subprocess.Popen(cmd, cwd=script_dir)
                 processes.append((worker_id, process))
                 time.sleep(1)  # Small delay between launches
@@ -73,28 +113,55 @@ def main():
             print("Dry run complete. Use --dry-run=false to actually run the processes.")
             return
         
-        print(f"All {args.num_workers} workers launched. Waiting for completion...")
+        print(f"All {args.num_workers} workers launched.")
         print("Press Ctrl+C to terminate all workers")
+        print()
         
-        # Wait for all processes to complete
-        while processes:
-            for i, (worker_id, process) in enumerate(processes):
-                if process.poll() is not None:
-                    # Process has finished
-                    return_code = process.returncode
-                    if return_code == 0:
-                        print(f"Worker {worker_id} completed successfully")
-                    else:
-                        print(f"Worker {worker_id} failed with return code {return_code}")
-                    processes.pop(i)
-                    break
+        # Create progress bar
+        with tqdm(total=args.total_trials, desc="Overall Progress", unit="trials") as pbar:
+            # Start progress monitoring thread
+            stop_event = threading.Event()
+            progress_thread = threading.Thread(
+                target=monitor_progress,
+                args=(progress_file, args.total_trials, pbar, stop_event)
+            )
+            progress_thread.daemon = True
+            progress_thread.start()
             
-            time.sleep(1)  # Check every second
+            # Wait for all processes to complete
+            while processes:
+                for i, (worker_id, process) in enumerate(processes):
+                    if process.poll() is not None:
+                        # Process has finished
+                        return_code = process.returncode
+                        if return_code == 0:
+                            print(f"\nWorker {worker_id} completed successfully")
+                        else:
+                            print(f"\nWorker {worker_id} failed with return code {return_code}")
+                        processes.pop(i)
+                        break
+                
+                time.sleep(1)  # Check every second
+            
+            # Stop progress monitoring
+            stop_event.set()
+            progress_thread.join(timeout=1)
+            
+            print("\nAll workers completed!")
         
-        print("All workers completed!")
+        # Clean up progress file
+        if progress_file.exists():
+            progress_file.unlink()
         
     except KeyboardInterrupt:
-        print("\nReceived interrupt signal. Terminating all workers...")
+        print("\n\nReceived interrupt signal. Terminating all workers...")
+        
+        # Stop progress monitoring if it exists
+        try:
+            stop_event.set()
+        except:
+            pass
+            
         for worker_id, process in processes:
             try:
                 process.terminate()
@@ -111,6 +178,15 @@ def main():
                 if process.poll() is None:
                     process.kill()
                     print(f"Force killed worker {worker_id}")
+            except:
+                pass
+        
+        # Clean up progress file
+        script_dir = Path(__file__).parent
+        progress_file = script_dir / "worker_progress.json"
+        if progress_file.exists():
+            try:
+                progress_file.unlink()
             except:
                 pass
         
