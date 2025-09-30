@@ -3,79 +3,52 @@ import csv
 import sys
 import math
 import numpy as np
-import itertools as it
 import multiprocessing as mp
-from functools import partial
 from tqdm import tqdm
 import trimesh
-import importlib
-import os, shutil, subprocess, tempfile, glob
 
 # ====================== CONFIG ======================
 config = {
-    # Fixed paths (as requested)
-    "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/CAD/cross_hole_real/cross_hole_real.stl",
-    "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/CAD/cross_peg_real/cross_peg_real.stl",
+    # Fixed paths
+    "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_hole/extrusion_hole.obj",
+    "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_peg/extrusion_peg.obj",
 
-    # Pose of mesh1 is static (change if needed)
+    # Pose of mesh1 (static)
     "mesh1_T": np.eye(4).tolist(),   # 4x4 row-major
 
     # mesh2 pose is sampled across 6-DoF (xyz + rpy)
     "sampling": {
         # Units: meters for xyz, radians for rpy unless 'degrees'=True
         "xyz": {
-            "x": {"min": -0.000, "max": 0.000, "step": 0.0025},
-            "y": {"min": -0.000, "max": 0.000, "step": 0.0025},
-            "z": {"min": -0.050, "max": 0.050, "step": 0.001},
+            "x": {"min": -0.000, "max": 0.003, "step": 0.0005},
+            "y": {"min": -0.000, "max": 0.003, "step": 0.0005},
+            "z": {"min": -0.0, "max": 0.025, "step": 0.0025},
         },
         "rpy": {
-            # For easier config, these are degrees by default (set degrees=False to use radians)
-            "roll":  {"min": -0.0, "max": 0.0, "step": 2.5},
-            "pitch": {"min": -0.0, "max": 0.0, "step": 2.5},
-            "yaw":   {"min": -0.0, "max": 0.0, "step": 2.5},
+            # These are degrees by default (set degrees=False to use radians)
+            "roll":  {"min": -0.0, "max": 3.0, "step": 0.25},
+            "pitch": {"min": -0.0, "max": 3.0, "step": 0.25},
+            "yaw":   {"min": -0.0, "max": 3.0, "step": 0.25},
         },
         "degrees": True,
         "inclusive": True,  # include the max endpoint if it lands on the grid
     },
 
-    # --- Contact modeling strategy ---
-    "use_vhacd": True,              # enable VHACD by default (most accurate for non-convex)
-    "fallback": "triangle_mesh",    # fallback only if VHACD unavailable
-
-    # VHACD parameters (CLI-first; tuned for accuracy over speed)
-    # Notes:
-    # - resolution: ↑ => tighter parts (slower)
-    # - max_hulls: ↑ => more parts (slower/closer fit)
-    # - error: ↓ (% volume error) => stricter (slower)
-    # - depth: ↑ => deeper recursion (slower)
-    "vhacd": {
-        "exe": "/usr/local/bin/vhacd",  # or just "vhacd" if on PATH
-        "resolution": 1_000_000_000,
-        "max_hulls": 2**11,
-        "error": 0.001,        # percent
-        "depth": 64,
-        # kept for pyVHACD fallback compatibility (ignored by CLI helper):
-        # "concavity": 0.001,
-        # "maxNumVerticesPerCH": 2**10,
-        # "minVolumePerCH": 1e-9,
-    },
-
-    # Parallel execution
+    # Parallel execution (only the pose sampling is parallel)
     "parallel": {
         "enabled": True,
-        "workers": 0,        # 0 or None => use mp.cpu_count()
+        "workers": 20,       # 0 or None => use mp.cpu_count()
         "chunksize": 16      # tune for throughput; larger = fewer IPC calls
     },
 
     # Output
-    "save": { # FIXME: update save path 
+    "save": {
         "csv_path": "./data_generation/pose_sweep_contacts.csv",
         "npz_path": "./data_generation/pose_sweep_contacts.npz",
         "max_contacts_to_print": 0  # prints none; raise for debug
     },
 }
 # ====================================================
-
 
 # ------------------------ Utils ------------------------
 
@@ -124,263 +97,15 @@ def _clean_mesh(m: trimesh.Trimesh) -> trimesh.Trimesh:
     m.remove_unreferenced_vertices()
     m.merge_vertices()
     m.remove_infinite_values()
-    m.rezero()
     return m
 
-def _vhacd_cli_decompose(mesh: trimesh.Trimesh, vhacd_cfg, quiet=True) -> list[trimesh.Trimesh]:
-    """
-    Decompose using the compiled VHACD CLI (TestVHACD).
-    Returns a list of hull meshes (Trimesh). Raises on failure.
-    """
-    exe = vhacd_cfg.get("exe", "vhacd")
-    exe_path = exe if os.path.sep in exe else shutil.which(exe)
-    if exe_path is None:
-        raise FileNotFoundError(f"VHACD executable not found: {exe}")
 
-    m = _clean_mesh(mesh)
-
-    with tempfile.TemporaryDirectory() as td:
-        in_path = os.path.join(td, "input.obj")
-        m.export(in_path)
-
-        cmd = [
-            exe_path,
-            in_path,
-            "-o", "obj",
-            "-h", str(vhacd_cfg.get("max_hulls", 128)),
-            "-r", str(vhacd_cfg.get("resolution", 400_000)),
-            "-e", str(vhacd_cfg.get("error", 0.5)),   # volume error percent
-            "-d", str(vhacd_cfg.get("depth", 12)),
-            "-g", "false" if quiet else "true",
-        ]
-
-        res = subprocess.run(
-            cmd, cwd=td, text=True,
-            stdout=(subprocess.PIPE if quiet else None),
-            stderr=(subprocess.PIPE if quiet else None)
-        )
-        if res.returncode != 0:
-            raise RuntimeError(f"VHACD CLI failed ({res.returncode}). "
-                               f"stdout:\n{res.stdout or ''}\nstderr:\n{res.stderr or ''}")
-
-        hull_paths = sorted(glob.glob(os.path.join(td, "*.obj")))
-        if not hull_paths:
-            raise RuntimeError("VHACD CLI produced no hull files")
-
-        parts = []
-        for hp in hull_paths:
-            L = trimesh.load(hp, force="mesh")
-            if isinstance(L, trimesh.Trimesh):
-                parts.append(_clean_mesh(L))
-            elif hasattr(L, "geometry") and L.geometry:
-                parts.extend([_clean_mesh(g) for g in L.geometry.values() if isinstance(g, trimesh.Trimesh)])
-        return parts
-
-def _convexify_all(parts: list[trimesh.Trimesh]) -> list[trimesh.Trimesh]:
-    """Guarantee strict convexity (defensive against tiny tessellation errors)."""
-    return [p if getattr(p, "is_convex", False) else p.convex_hull for p in parts]
-
-
-def _vhacd_decompose_pyVHACD_only(mesh: trimesh.Trimesh, debug=False):
-    """
-    Decompose using pyVHACD builds that expose ONLY `compute_vhacd(V, F)`.
-    Strategy:
-      1) Try with NumPy arrays (C-contiguous, owned).
-      2) On "resize only works on single-segment arrays", retry with nested Python lists.
-      3) As last resort, retry with flattened lists.
-    Returns list[trimesh.Trimesh] or [].
-    """
-    spec = importlib.util.find_spec("pyVHACD")
-    if spec is None:
-        if debug: print("[VHACD] pyVHACD not importable")
-        return []
-
-    pyVHACD = importlib.import_module("pyVHACD")
-    if not hasattr(pyVHACD, "compute_vhacd") or not callable(pyVHACD.compute_vhacd):
-        if debug: print("[VHACD] pyVHACD.compute_vhacd missing/not callable")
-        return []
-
-    # --- Clean mesh ---
-    m = _clean_mesh(mesh)
-
-    # ---------- Attempt 1: NumPy arrays (owned, C-contiguous) ----------
-    V = np.array(m.vertices, dtype=np.float64, order="C", copy=True)
-    F = np.array(m.faces,    dtype=np.int32,   order="C", copy=True)
-    V = np.require(V, requirements=["O","W","C"])
-    F = np.require(F, requirements=["O","W","C"])
-    try:
-        out = pyVHACD.compute_vhacd(V, F)
-        if debug: print("[VHACD] compute_vhacd(V,F[int32]) ok (NumPy)")
-        parts = _vhacd_normalize_return(out, debug=debug)
-        if parts: return parts
-    except Exception as e_np:
-        if debug:
-            print(f"[VHACD] NumPy call failed: {type(e_np).__name__}: {e_np}")
-
-    # Try uint32 faces quickly
-    F_u = np.array(m.faces, dtype=np.uint32, order="C", copy=True)
-    F_u = np.require(F_u, requirements=["O","W","C"])
-    try:
-        out = pyVHACD.compute_vhacd(V, F_u)
-        if debug: print("[VHACD] compute_vhacd(V,F[uint32]) ok (NumPy)")
-        parts = _vhacd_normalize_return(out, debug=debug)
-        if parts: return parts
-    except Exception as e_np2:
-        if debug:
-            print(f"[VHACD] NumPy call (uint32) failed: {type(e_np2).__name__}: {e_np2}")
-
-    # ---------- Attempt 2: nested Python lists (Nx3) ----------
-    V_list = m.vertices.tolist()
-    F_list32 = m.faces.astype(np.int32, copy=False).tolist()
-    try:
-        out = pyVHACD.compute_vhacd(V_list, F_list32)
-        if debug: print("[VHACD] compute_vhacd(V_list, F_list[int32]) ok (lists)")
-        parts = _vhacd_normalize_return(out, debug=debug)
-        if parts: return parts
-    except Exception as e_list:
-        if debug:
-            print(f"[VHACD] List call (int32) failed: {type(e_list).__name__}: {e_list}")
-
-    # Try uint32 as lists
-    F_listu = m.faces.astype(np.uint32, copy=False).tolist()
-    try:
-        out = pyVHACD.compute_vhacd(V_list, F_listu)
-        if debug: print("[VHACD] compute_vhacd(V_list, F_list[uint32]) ok (lists)")
-        parts = _vhacd_normalize_return(out, debug=debug)
-        if parts: return parts
-    except Exception as e_list2:
-        if debug:
-            print(f"[VHACD] List call (uint32) failed: {type(e_list2).__name__}: {e_list2}")
-
-    # ---------- Attempt 3: flattened lists ----------
-    V_flat = np.array(m.vertices, dtype=np.float64, order="C", copy=True).reshape(-1).tolist()
-    F_flat32 = np.array(m.faces, dtype=np.int32, order="C", copy=True).reshape(-1).tolist()
-    try:
-        out = pyVHACD.compute_vhacd(V_flat, F_flat32)
-        if debug: print("[VHACD] compute_vhacd(V_flat, F_flat[int32]) ok (flat lists)")
-        parts = _vhacd_normalize_return(out, flat_input=True, debug=debug)
-        if parts: return parts
-    except Exception as e_flat:
-        if debug:
-            print(f"[VHACD] Flat list call failed: {type(e_flat).__name__}: {e_flat}")
-
-    if debug: print("[VHACD] All strategies failed for this pyVHACD build.")
-    return []
-
-
-def _vhacd_normalize_return(out, flat_input=False, debug=False):
-    """
-    Convert pyVHACD results (various formats) to list[trimesh.Trimesh].
-    If flat_input=True, expects the function to return hulls that include shape info.
-    """
-    parts = []
-
-    # (1) tuple: (verts_list, faces_list)
-    if isinstance(out, tuple) and len(out) == 2:
-        verts_list, faces_list = out
-        for v, f in zip(verts_list, faces_list):
-            v = np.asarray(v, dtype=np.float64)
-            f = np.asarray(f, dtype=np.int32)
-            if v.size and f.size:
-                parts.append(trimesh.Trimesh(vertices=v, faces=f, process=False))
-        return parts
-
-    # (2) list of dicts with "vertices"/"triangles"
-    if isinstance(out, list) and out and isinstance(out[0], dict):
-        for h in out:
-            v = np.asarray(h.get("vertices", []), dtype=np.float64)
-            f = np.asarray(h.get("triangles", h.get("faces", [])), dtype=np.int32)
-            if v.size and f.size:
-                parts.append(trimesh.Trimesh(vertices=v, faces=f, process=False))
-        return parts
-
-    # (3) list of hull objects with .points/.triangles
-    if isinstance(out, list) and out:
-        first = out[0]
-        if not isinstance(first, (np.ndarray, list, tuple, dict)):
-            for h in out:
-                v = np.asarray(getattr(h, "points", getattr(h, "vertices", [])), dtype=np.float64)
-                f = np.asarray(getattr(h, "triangles", getattr(h, "faces", [])), dtype=np.int32)
-                if v.size and f.size:
-                    parts.append(trimesh.Trimesh(vertices=v, faces=f, process=False))
-            return parts
-
-    # (4) flat-input special cases:
-    # Some bindings return (verts_list, faces_list) even for flat input.
-    # If not, there's no universal way to recover shapes here without extra getters.
-    if flat_input and isinstance(out, list) and out and isinstance(out[0], dict):
-        # already handled above, but keep for clarity
-        for h in out:
-            v = np.asarray(h.get("vertices", []), dtype=np.float64)
-            f = np.asarray(h.get("triangles", h.get("faces", [])), dtype=np.int32)
-            if v.size and f.size:
-                parts.append(trimesh.Trimesh(vertices=v, faces=f, process=False))
-        return parts
-
-    if debug:
-        print("[VHACD] Unrecognized return format:", type(out))
-    return parts
-
-def decompose_convex_parts(mesh, vhacd_cfg, debug=True):
-    # 1) Prefer the CLI you built (robust; avoids NumPy-resize bug)
-    try:
-        parts = _vhacd_cli_decompose(mesh, vhacd_cfg, quiet=not debug)
-        if parts:
-            parts = _convexify_all(parts)   # <-- convexify by default
-            if debug: print(f"[VHACD] CLI produced {len(parts)} convex parts")
-            return parts
-    except Exception as e:
-        if debug: print(f"[VHACD] CLI failed: {e}")
-
-    # 2) Fallback to pyVHACD bindings (if present)
-    try:
-        parts = _vhacd_decompose_pyVHACD_only(mesh, debug=debug)
-        if parts:
-            parts = _convexify_all(parts)   # <-- convexify by default
-            if debug: print(f"[VHACD] pyVHACD produced {len(parts)} convex parts")
-            return parts
-    except Exception as e:
-        if debug: print(f"[VHACD] pyVHACD failed: {e}")
-
-    # 3) Decomposition failed
-    return None
-
-def build_manager_from_parts(name_prefix, parts, T):
+def build_manager_triangle_mesh(name_prefix, mesh, T):
+    """Always use triangle mesh (no convex decomposition)."""
     from trimesh.collision import CollisionManager
     cm = CollisionManager()
-    for i, p in enumerate(parts):
-        cm.add_object(f"{name_prefix}_{i}", p, transform=T)
+    cm.add_object(name_prefix, mesh, transform=T)
     return cm
-
-
-def build_manager_for_mesh(name_prefix, mesh, T, cfg):
-    """
-    Strategy: VHACD -> fallback ('triangle_mesh' by default) -> 'convex_hull' if asked.
-    Notes:
-      - VHACD gives the most reliable penetration depths on non-convex geometry.
-      - triangle_mesh is fine for collision/no-collision and distances,
-        but penetration depths can be noisier or under-reported.
-    """
-    if cfg.get("use_vhacd", True):
-        parts = decompose_convex_parts(mesh, cfg.get("vhacd", {}))
-        if parts is not None:
-            return build_manager_from_parts(name_prefix, parts, T), "vhacd"
-        
-    # Fallback strategy
-    print("[WARN] VHACD failed or disabled; using fallback collision strategy.", file=sys.stderr)
-
-    fallback = cfg.get("fallback", "triangle_mesh")
-    if fallback == "triangle_mesh":
-        from trimesh.collision import CollisionManager
-        cm = CollisionManager()
-        cm.add_object(name_prefix, mesh, transform=T)
-        return cm, "triangle_mesh"
-    elif fallback == "convex_hull":
-        hull = mesh.convex_hull
-        return build_manager_from_parts(name_prefix, [hull], T), "convex_hull"
-
-    else:
-        raise ValueError(f"Unknown fallback: {fallback}")
 
 
 def contact_points_localized(contact_blob, T1, T2):
@@ -389,6 +114,8 @@ def contact_points_localized(contact_blob, T1, T2):
     Robust to trimesh/python-fcl version differences.
     Returns (depths:list[float], contacts:list[dict]).
     """
+    import numpy as np
+
     def normalize_contact_records(blob):
         if isinstance(blob, (list, tuple)):
             for item in blob:
@@ -510,7 +237,10 @@ def sample_pose_grid(sampling_cfg):
 _G = {}
 
 def _worker_init(cfg):
-    """Initializer: executed once per worker process; loads meshes and builds managers."""
+    """
+    Initializer: executed once per worker process.
+    Loads meshes and builds managers (triangle meshes only).
+    """
     ensure_fcl()
     m1 = trimesh.load(cfg["mesh1"], force="mesh")
     m2 = trimesh.load(cfg["mesh2"], force="mesh")
@@ -518,17 +248,16 @@ def _worker_init(cfg):
         raise RuntimeError("One of the input meshes is empty.")
 
     # Light cleanup helps robustness
-    for m in (m1, m2):
-        m = _clean_mesh(m)  # ensure consistent topology; avoids deprecated calls
-
+    m1 = _clean_mesh(m1)
+    m2 = _clean_mesh(m2)
 
     T1 = np.array(cfg.get("mesh1_T", np.eye(4)), float)
 
-    # Build managers once per worker
-    cm1, strat1 = build_manager_for_mesh("mesh1", m1, T1, cfg)
-    cm2, strat2 = build_manager_for_mesh("mesh2", m2, np.eye(4), cfg)
+    # Build triangle-mesh collision managers once per worker
+    cm1 = build_manager_triangle_mesh("mesh1", m1, T1)
+    cm2 = build_manager_triangle_mesh("mesh2", m2, np.eye(4))
 
-    # cache object names for the second manager so we can update transforms
+    # Cache object names for the second manager so we can update transforms
     names2 = list(cm2._objs.keys())
 
     _G["cfg"] = cfg
@@ -536,8 +265,6 @@ def _worker_init(cfg):
     _G["cm1"] = cm1
     _G["cm2"] = cm2
     _G["names2"] = names2
-    _G["strat1"] = strat1
-    _G["strat2"] = strat2
 
 
 def _eval_pose(pose_tuple):
@@ -549,7 +276,7 @@ def _eval_pose(pose_tuple):
     cm2 = _G["cm2"]
     names2 = _G["names2"]
 
-    # Build transform for mesh2 and set for all its parts
+    # Build transform for mesh2 and set for all its parts (here just one object)
     T2 = make_T_from_xyz_rpy(x, y, z, r, p, yv, degrees=False)
     for n in names2:
         cm2.set_transform(n, T2)
@@ -578,7 +305,7 @@ def main(cfg):
     pose_iter = ((x, y, z, r, p, yv) for x in xs for y in ys for z in zs
                                   for r in rolls for p in pitchs for yv in yaws)
 
-    # Parallel or serial execution
+    # Parallel or serial execution (only pose sampling is parallelized)
     par = cfg.get("parallel", {})
     use_parallel = bool(par.get("enabled", True))
     workers = int(par.get("workers") or 0) or mp.cpu_count()
@@ -587,7 +314,7 @@ def main(cfg):
     rows = []
 
     if use_parallel:
-        # Use "spawn" on some platforms for safety (fork can inherit non-fork-safe handles).
+        # Use "spawn" for safety (fork can inherit non-fork-safe handles).
         ctx = mp.get_context("spawn")
         with ctx.Pool(processes=workers, initializer=_worker_init, initargs=(cfg,)) as pool:
             for out in tqdm(pool.imap(_eval_pose, pose_iter, chunksize=chunksize),
