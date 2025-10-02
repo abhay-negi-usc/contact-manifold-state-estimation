@@ -13,3 +13,7 @@ utils/*.pyc
 __pycache__
 *.pyc
 .DS_Store
+*.csv 
+*.npz
+data_generation/*.csv
+data_generation/*.npz

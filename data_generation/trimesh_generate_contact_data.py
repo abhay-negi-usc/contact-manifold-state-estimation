@@ -16,19 +16,20 @@ config = {
     # Pose of mesh1 (static)
     "mesh1_T": np.eye(4).tolist(),   # 4x4 row-major
 
-    # mesh2 pose is sampled across 6-DoF (xyz + rpy)
+    # mesh2 pose is sampled across 6-DoF (xyz + abc)
     "sampling": {
-        # Units: meters for xyz, radians for rpy unless 'degrees'=True
+        # Units: meters for xyz, radians for abc unless 'degrees'=True
         "xyz": {
-            "x": {"min": -0.000, "max": 0.003, "step": 0.0005},
-            "y": {"min": -0.000, "max": 0.003, "step": 0.0005},
+            "x": {"min": -0.000, "max": 0.003, "step": 0.0003},
+            "y": {"min": -0.000, "max": 0.003, "step": 0.0003},
             "z": {"min": -0.0, "max": 0.025, "step": 0.0025},
         },
-        "rpy": {
+        "abc": {
             # These are degrees by default (set degrees=False to use radians)
-            "roll":  {"min": -0.0, "max": 3.0, "step": 0.25},
-            "pitch": {"min": -0.0, "max": 3.0, "step": 0.25},
-            "yaw":   {"min": -0.0, "max": 3.0, "step": 0.25},
+            # Follows scipy convention: R.from_euler('xyz', [c, b, a], degrees=True)
+            "a": {"min": -0.0, "max": 3.0, "step": 0.25},
+            "b": {"min": -0.0, "max": 3.0, "step": 0.25},
+            "c": {"min": -0.0, "max": 3.0, "step": 0.25},
         },
         "degrees": True,
         "inclusive": True,  # include the max endpoint if it lands on the grid
@@ -52,27 +53,41 @@ config = {
 
 # ------------------------ Utils ------------------------
 
-def rpy_to_matrix(roll, pitch, yaw, degrees=False):
+def abc_to_matrix(a, b, c, degrees=False):
+    """
+    Convert angles a, b, c to rotation matrix using scipy convention:
+    R.from_euler('xyz', [c, b, a], degrees=True).as_matrix()
+    """
     if degrees:
-        roll, pitch, yaw = np.deg2rad([roll, pitch, yaw])
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    Rz = np.array([[cy, -sy, 0],
-                   [sy,  cy, 0],
-                   [ 0,   0, 1]])
-    Ry = np.array([[ cp, 0, sp],
-                   [  0, 1,  0],
-                   [-sp, 0, cp]])
+        a, b, c = np.deg2rad([a, b, c])
+    
+    # Rotation matrices for x, y, z rotations
+    ca, sa = np.cos(a), np.sin(a)
+    cb, sb = np.cos(b), np.sin(b)
+    cc, sc = np.cos(c), np.sin(c)
+    
+    # X rotation (angle c)
     Rx = np.array([[1,  0,   0],
-                   [0, cr, -sr],
-                   [0, sr,  cr]])
+                   [0, cc, -sc],
+                   [0, sc,  cc]])
+    
+    # Y rotation (angle b)
+    Ry = np.array([[ cb, 0, sb],
+                   [  0, 1,  0],
+                   [-sb, 0, cb]])
+    
+    # Z rotation (angle a)
+    Rz = np.array([[ca, -sa, 0],
+                   [sa,  ca, 0],
+                   [ 0,   0, 1]])
+    
+    # Apply in order: Rz * Ry * Rx (equivalent to 'xyz' order with [c,b,a])
     return Rz @ Ry @ Rx
 
 
-def make_T_from_xyz_rpy(x, y, z, r, p, yv, degrees=False):
+def make_T_from_xyz_abc(x, y, z, a, b, c, degrees=False):
     T = np.eye(4)
-    T[:3, :3] = rpy_to_matrix(r, p, yv, degrees=degrees)
+    T[:3, :3] = abc_to_matrix(a, b, c, degrees=degrees)
     T[:3, 3] = [x, y, z]
     return T
 
@@ -225,10 +240,10 @@ def sample_pose_grid(sampling_cfg):
     def to_base(arr):
         return np.deg2rad(arr) if deg else arr
 
-    rolls  = to_base(build_grid(sampling_cfg["rpy"]["roll"],  sampling_cfg.get("inclusive", True)))
-    pitchs = to_base(build_grid(sampling_cfg["rpy"]["pitch"], sampling_cfg.get("inclusive", True)))
-    yaws   = to_base(build_grid(sampling_cfg["rpy"]["yaw"],   sampling_cfg.get("inclusive", True)))
-    return xs, ys, zs, rolls, pitchs, yaws
+    a_vals = to_base(build_grid(sampling_cfg["abc"]["a"], sampling_cfg.get("inclusive", True)))
+    b_vals = to_base(build_grid(sampling_cfg["abc"]["b"], sampling_cfg.get("inclusive", True)))
+    c_vals = to_base(build_grid(sampling_cfg["abc"]["c"], sampling_cfg.get("inclusive", True)))
+    return xs, ys, zs, a_vals, b_vals, c_vals
 
 
 # ---------------------- Parallel worker setup ----------------------
@@ -268,8 +283,8 @@ def _worker_init(cfg):
 
 
 def _eval_pose(pose_tuple):
-    """Worker: evaluate a single pose (x,y,z,r,p,y). Return 8-tuple row."""
-    x, y, z, r, p, yv = pose_tuple
+    """Worker: evaluate a single pose (x,y,z,a,b,c). Return 8-tuple row."""
+    x, y, z, a, b, c = pose_tuple
     cfg = _G["cfg"]
     T1 = _G["T1"]
     cm1 = _G["cm1"]
@@ -277,7 +292,7 @@ def _eval_pose(pose_tuple):
     names2 = _G["names2"]
 
     # Build transform for mesh2 and set for all its parts (here just one object)
-    T2 = make_T_from_xyz_rpy(x, y, z, r, p, yv, degrees=False)
+    T2 = make_T_from_xyz_abc(x, y, z, a, b, c, degrees=False)
     for n in names2:
         cm2.set_transform(n, T2)
 
@@ -286,11 +301,11 @@ def _eval_pose(pose_tuple):
     if is_hit:
         depths, _contacts = contact_points_localized(cdata, T1, T2)
         max_depth = float(max(depths)) if depths else 0.0
-        return (x, y, z, r, p, yv, 1.0, max_depth)
+        return (x, y, z, a, b, c, 1.0, max_depth)
 
     # No collision -> min separation
     dist, names, ddata = cm1.min_distance_other(cm2, return_names=True, return_data=True)
-    return (x, y, z, r, p, yv, 0.0, float(dist))
+    return (x, y, z, a, b, c, 0.0, float(dist))
 
 
 # ---------------------- Main sweep ----------------------
@@ -333,7 +348,7 @@ def main(cfg):
 
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["x", "y", "z", "roll", "pitch", "yaw", "contact", "metric"])
+        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "metric"])
         w.writerow(["units: m", "m", "m", "rad", "rad", "rad", "0/1",
                     "depth_if_contact_else_distance"])
         for r in results:
@@ -341,7 +356,7 @@ def main(cfg):
 
     np.savez(npz_path,
              results=results,
-             columns=np.array(["x","y","z","roll","pitch","yaw","contact","metric"], dtype=object))
+             columns=np.array(["x","y","z","a","b","c","contact","metric"], dtype=object))
 
     print(f"[INFO] Saved CSV to {csv_path}")
     print(f"[INFO] Saved NPZ to {npz_path}")
