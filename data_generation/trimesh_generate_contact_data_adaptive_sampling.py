@@ -25,6 +25,9 @@ import trimesh
 
 # ====================== CONFIG ======================
 config = {
+    # Geometry identifier for output filename
+    "geometry": "extrusion",
+    
     # Fixed paths
     "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_hole/extrusion_hole.obj",
     "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_peg/extrusion_peg.obj",
@@ -38,7 +41,7 @@ config = {
         "xyz": {
             "x": {"min": -0.005, "max": 0.005, "step": 0.0005},
             "y": {"min": -0.005, "max": 0.005, "step": 0.0005},
-            "z": {"min": 0.0, "max": 0.025, "step": 0.0025},  # z is the primary axis
+            "z": {"min": 0.0, "max": 0.0, "step": 0.025},  # z is the primary axis
         },
         "abc": {
             # These are degrees by default (set degrees=False to use radians)
@@ -51,7 +54,7 @@ config = {
         "inclusive": True,  # include the max endpoint if it lands on the grid
         "adaptive": True,    # enable adaptive per-slice sampling
         "search_margin": 0.1,  # safety margin when searching for contact bounds
-        "max_penetration_depth": 0.0005,  # maximum allowed penetration depth in meters (1mm)
+        "max_penetration_depth": 0.0005,  # maximum allowed penetration depth in meters
     },
 
     # Parallel execution (can be used for both traditional and adaptive sampling)
@@ -67,8 +70,7 @@ config = {
 
     # Output
     "save": {
-        "csv_path": "./data_generation/pose_sweep_contacts_adaptive.csv",
-        "npz_path": "./data_generation/pose_sweep_contacts_adaptive.npz",
+        "csv_path": "./data_generation/{geometry}_pose_sweep_contacts_adaptive.csv",
         "max_contacts_to_print": 0  # prints none; raise for debug
     },
 }
@@ -472,7 +474,13 @@ def _worker_init(cfg):
 
 
 def _eval_pose(pose_tuple):
-    """Worker: evaluate a single pose (x,y,z,a,b,c). Return 8-tuple row."""
+    """
+    Worker: evaluate a single pose (x,y,z,a,b,c). 
+    Return 8-tuple row: (x_mm, y_mm, z_mm, a_deg, b_deg, c_deg, contact_flag, contact_distance_mm)
+    where contact_distance is:
+    - (negative) Maximum penetration depth if in contact 
+    - (positive) Minimum separation distance if not in contact
+    """
     x, y, z, a, b, c = pose_tuple
     cfg = _G["cfg"]
     T1 = _G["T1"]
@@ -488,13 +496,16 @@ def _eval_pose(pose_tuple):
     # Query collision
     is_hit, pair_names, cdata = cm1.in_collision_other(cm2, return_names=True, return_data=True)
     if is_hit:
+        # Contact detected: use maximum penetration depth as contact_distance
         depths, _contacts = contact_points_localized(cdata, T1, T2)
-        max_depth = float(max(depths)) if depths else 0.0
-        return (x, y, z, a, b, c, 1.0, max_depth)
+        max_depth = -1.0 * float(max(depths)) if depths else 0.0
+        # Convert to output units: mm for distance, degrees for angles
+        return (x * 1000, y * 1000, z * 1000, np.rad2deg(a), np.rad2deg(b), np.rad2deg(c), 1.0, max_depth * 1000)
 
-    # No collision -> min separation
+    # No collision: use minimum separation distance as contact_distance
     dist, names, ddata = cm1.min_distance_other(cm2, return_names=True, return_data=True)
-    return (x, y, z, a, b, c, 0.0, float(dist))
+    # Convert to output units: mm for distance, degrees for angles
+    return (x * 1000, y * 1000, z * 1000, np.rad2deg(a), np.rad2deg(b), np.rad2deg(c), 0.0, float(dist) * 1000)
 
 
 # ---------------------- Parallel bound finding ------------------------
@@ -884,23 +895,17 @@ def main(cfg):
 
     # Convert to array and save
     results = np.array(rows, dtype=float)
-    csv_path = cfg["save"]["csv_path"]
-    npz_path = cfg["save"]["npz_path"]
+    csv_path = cfg["save"]["csv_path"].format(geometry=cfg["geometry"])
 
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "metric"])
-        w.writerow(["units: m", "m", "m", "rad", "rad", "rad", "0/1",
-                    "depth_if_contact_else_distance"])
+        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "contact_distance"])
+        w.writerow(["units: mm", "mm", "mm", "deg", "deg", "deg", "0/1",
+                    "max_penetration_depth_if_contact_else_min_separation_distance_mm"])
         for r in results:
             w.writerow([f"{v:.10g}" for v in r])
 
-    np.savez(npz_path,
-             results=results,
-             columns=np.array(["x","y","z","a","b","c","contact","metric"], dtype=object))
-
     print(f"[INFO] Saved CSV to {csv_path}")
-    print(f"[INFO] Saved NPZ to {npz_path}")
     
     if use_adaptive:
         # Print some statistics about the adaptive sampling
