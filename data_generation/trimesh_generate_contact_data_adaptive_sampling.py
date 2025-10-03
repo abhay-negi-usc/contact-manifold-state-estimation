@@ -14,6 +14,8 @@ the sampling bounds based on the contact manifold at each level.
 
 The advantage is that it focuses sampling effort on regions where contact actually occurs,
 potentially providing much higher contact efficiency than uniform grid sampling.
+
+Output includes both Euler angles (a,b,c) and their corresponding so(3) logmap representations (wx,wy,wz).
 """
 import csv
 import sys
@@ -22,6 +24,7 @@ import numpy as np
 import multiprocessing as mp
 from tqdm import tqdm
 import trimesh
+from scipy.spatial.transform import Rotation as R
 
 # ====================== CONFIG ======================
 config = {
@@ -70,7 +73,7 @@ config = {
 
     # Output
     "save": {
-        "csv_path": "./data_generation/{geometry}_pose_sweep_contacts_adaptive.csv",
+        "csv_path": "./data_generation/{geometry}_pose_sweep_contacts_adaptive_with_logmaps.csv",
         "max_contacts_to_print": 0  # prints none; raise for debug
     },
 }
@@ -895,21 +898,35 @@ def main(cfg):
 
     # Convert to array and save
     results = np.array(rows, dtype=float)
+    
+    # Calculate logmap representations (so(3) axis-angle vectors) from Euler angles
+    print("[INFO] Computing logmap representations from Euler angles...")
+    angles_deg = results[:, 3:6]  # columns a, b, c in degrees
+    
+    # Use SciPy's vectorized conversion:
+    # from_euler(...).as_rotvec() returns axis-angle vector (the so(3) log map)
+    logmaps = R.from_euler('xyz', angles_deg, degrees=True).as_rotvec()  # shape (N,3), in radians
+    
+    # Combine original results with logmaps
+    # results: [x_mm, y_mm, z_mm, a_deg, b_deg, c_deg, contact, contact_distance]
+    # logmaps: [wx_rad, wy_rad, wz_rad]
+    results_with_logmaps = np.hstack([results, logmaps])
+    
     csv_path = cfg["save"]["csv_path"].format(geometry=cfg["geometry"])
 
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "contact_distance"])
+        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "contact_distance", "wx", "wy", "wz"])
         w.writerow(["units: mm", "mm", "mm", "deg", "deg", "deg", "0/1",
-                    "max_penetration_depth_if_contact_else_min_separation_distance_mm"])
-        for r in results:
+                    "max_penetration_depth_if_contact_else_min_separation_distance_mm", "rad", "rad", "rad"])
+        for r in results_with_logmaps:
             w.writerow([f"{v:.10g}" for v in r])
 
     print(f"[INFO] Saved CSV to {csv_path}")
     
     if use_adaptive:
         # Print some statistics about the adaptive sampling
-        contact_results = results[results[:, 6] > 0.5]
+        contact_results = results[results[:, 6] > 0.5]  # Use original results for stats
         print(f"[INFO] Adaptive sampling found {len(contact_results)} contact poses out of {len(results)} total poses")
         if len(contact_results) > 0:
             print(f"[INFO] Contact efficiency: {len(contact_results)/len(results)*100:.1f}%")

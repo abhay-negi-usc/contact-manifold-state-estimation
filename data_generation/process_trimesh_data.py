@@ -4,7 +4,7 @@ from scipy.spatial.transform import Rotation as R
 
 # --- Config ---
 BATCH_SIZE = 100_000  # tune based on your RAM/CPU
-INPUT_CSV  = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_pose_sweep_contacts_adaptive.csv"
+INPUT_CSV  = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data.csv"
 OUTPUT_CSV = INPUT_CSV.replace(".csv", "_with_logmaps.csv")
 
 # --- Progress bar (tqdm) ---
