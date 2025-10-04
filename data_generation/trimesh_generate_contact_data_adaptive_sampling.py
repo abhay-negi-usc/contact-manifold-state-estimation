@@ -32,8 +32,8 @@ config = {
     "geometry": "extrusion",
     
     # Fixed paths
-    "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_hole/extrusion_hole.obj",
-    "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_peg/extrusion_peg.obj",
+    "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_hole.obj",
+    "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_peg.obj",
 
     # Pose of mesh1 (static)
     "mesh1_T": np.eye(4).tolist(),   # 4x4 row-major
@@ -44,7 +44,7 @@ config = {
         "xyz": {
             "x": {"min": -0.005, "max": 0.005, "step": 0.0005},
             "y": {"min": -0.005, "max": 0.005, "step": 0.0005},
-            "z": {"min": 0.0, "max": 0.0, "step": 0.025},  # z is the primary axis
+            "z": {"min": 0.0, "max": 0.025, "step": 0.0025},  # z is the primary axis
         },
         "abc": {
             # These are degrees by default (set degrees=False to use radians)
@@ -63,8 +63,8 @@ config = {
     # Parallel execution (can be used for both traditional and adaptive sampling)
     "parallel": {
         "enabled": True,
-        "workers": 20,       # 0 or None => use mp.cpu_count()
-        "chunksize": 16,     # tune for throughput; larger = fewer IPC calls
+        "workers": 16,       # 0 or None => use mp.cpu_count()
+        "chunksize": 8,     # tune for throughput; larger = fewer IPC calls
         "adaptive_parallel": True,  # enable parallelization for adaptive sampling
         "z_slice_parallel": True,   # parallelize across z-slices
         "axis_parallel": False,     # parallelize axis bound finding within each z-slice (can cause oversubscription)

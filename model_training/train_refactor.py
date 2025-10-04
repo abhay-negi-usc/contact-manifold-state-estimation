@@ -43,8 +43,8 @@ class TrainConfig:
         "wx": "rad", "wy": "rad", "wz": "rad"
     }
     layer_sizes: tuple = (6, 2048, 2048, 2048, 2048, 6)
-    lr: float = 1e-6
-    epochs: int = 1_000_000
+    lr: float = 1e-5
+    epochs: int = 10_000_000
     batch_size: int = 2**18
     num_workers: int = 0
     pin_memory: bool = True
@@ -429,11 +429,8 @@ def main():
         train_rot_norm_deg = np.concatenate(train_rot_norm_deg) if train_rot_norm_deg else np.array([0.0])
 
         print(f"\nEpoch {epoch:04d} | Train Loss: {epoch_loss:.6f}")
-        print(f"  Train ||e_t|| ({cfg.data_units['x']}): mean={train_trans_errs.mean():.4f}, std={train_trans_errs.std():.4f}, MAE={np.abs(train_trans_errs).mean():.4f}")
-        # print(f"  Train |wx| (deg): mean={train_rot_comp_deg[:,0].mean():.4f}, std={train_rot_comp_deg[:,0].std():.4f}, MAE={np.abs(train_rot_comp_deg[:,0]).mean():.4f}")
-        # print(f"  Train |wy| (deg): mean={train_rot_comp_deg[:,1].mean():.4f}, std={train_rot_comp_deg[:,1].std():.4f}, MAE={np.abs(train_rot_comp_deg[:,1]).mean():.4f}")
-        # print(f"  Train |wz| (deg): mean={train_rot_comp_deg[:,2].mean():.4f}, std={train_rot_comp_deg[:,2].std():.4f}, MAE={np.abs(train_rot_comp_deg[:,2]).mean():.4f}")
-        print(f"  Train ||e_w|| (deg): mean={train_rot_norm_deg.mean():.4f}, std={train_rot_norm_deg.std():.4f}, MAE={np.abs(train_rot_norm_deg).mean():.4f}")
+        print(f"  Train ||e_t|| ({cfg.data_units['x']}): mean={train_trans_errs.mean():.4f}, std={train_trans_errs.std():.4f}")
+        print(f"  Train ||e_w|| (deg): mean={train_rot_norm_deg.mean():.4f}, std={train_rot_norm_deg.std():.4f}")
 
         # ---- Fresh evaluation
         if (epoch % cfg.eval_every) == 0:

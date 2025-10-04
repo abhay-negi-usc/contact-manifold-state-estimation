@@ -19,3 +19,4 @@ data_generation/*.csv
 data_generation/*.npz
 wandb 
 model_training/checkpoints/*.pth
+*.png 
