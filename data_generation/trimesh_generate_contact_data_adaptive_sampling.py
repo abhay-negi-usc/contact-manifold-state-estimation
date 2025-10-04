@@ -25,15 +25,20 @@ import multiprocessing as mp
 from tqdm import tqdm
 import trimesh
 from scipy.spatial.transform import Rotation as R
+import os
+import pickle
+import random
+import time
 
 # ====================== CONFIG ======================
+geometry = "gear"
 config = {
     # Geometry identifier for output filename
-    "geometry": "extrusion",
+    "geometry": geometry,
     
     # Fixed paths
-    "mesh1": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_hole.obj",
-    "mesh2": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_peg.obj",
+    "mesh1": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_hole.obj",
+    "mesh2": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_peg.obj",
 
     # Pose of mesh1 (static)
     "mesh1_T": np.eye(4).tolist(),   # 4x4 row-major
@@ -66,15 +71,26 @@ config = {
         "workers": 16,       # 0 or None => use mp.cpu_count()
         "chunksize": 8,     # tune for throughput; larger = fewer IPC calls
         "adaptive_parallel": True,  # enable parallelization for adaptive sampling
-        "z_slice_parallel": True,   # parallelize across z-slices
+        "z_slice_parallel": False,   # parallelize across z-slices
         "axis_parallel": False,     # parallelize axis bound finding within each z-slice (can cause oversubscription)
         "pose_parallel": True,      # parallelize pose evaluation after adaptive bound finding
+        "checkpoint_method": "batched",  # "batched" or "callback" - method for parallel checkpointing
+    },
+
+    "intervals": {
+        "coarse_factor": 1,     # sweep step = axis_step / coarse_factor
+        "edge_refine_iters": 6, # binary search steps to refine each interval edge
+        "erode_steps": 1,       # shrink each interval on both sides by erode_steps * axis_step
+        "min_interval_steps": 2,# drop tiny intervals (fewer than this many steps after erosion)
     },
 
     # Output
     "save": {
         "csv_path": "./data_generation/{geometry}_pose_sweep_contacts_adaptive_with_logmaps.csv",
-        "max_contacts_to_print": 0  # prints none; raise for debug
+        "checkpoint_path": "./data_generation/{geometry}_checkpoint.pkl",
+        "max_contacts_to_print": 0,  # prints none; raise for debug
+        "save_interval": 10_000,  # save checkpoint every N poses
+        "randomize_poses": True,  # randomize pose order for better interruption handling
     },
 }
 # ====================================================
@@ -258,100 +274,20 @@ def build_grid(axis_cfg, inclusive=True):
         arr[-1] = hi
     return arr
 
-
-def find_contact_bounds_for_axis(axis_name, z_val, cfg):
-    """
-    Find the min/max values for a given axis where contact occurs at a fixed z value.
-    Only considers contacts up to a maximum penetration depth threshold.
-    Searches bidirectionally from zero to find both bounds.
-    
-    Args:
-        axis_name: one of 'x', 'y', 'a', 'b', 'c'
-        z_val: fixed z value
-        cfg: configuration dictionary
-    
-    Returns:
-        (min_val, max_val): tuple of bounds where contact occurs, or (None, None) if no contact
-    """
-    sampling_cfg = cfg["sampling"]
-    deg = sampling_cfg.get("degrees", False)
-    margin = sampling_cfg.get("search_margin", 0.1)
-    max_penetration = sampling_cfg.get("max_penetration_depth", 0.001)  # default 1mm
-    
-    # Get the axis configuration
-    if axis_name in ['x', 'y']:
-        axis_cfg = sampling_cfg["xyz"][axis_name]
+def build_grids_from_intervals(axis_name, intervals, sampling_cfg):
+    if axis_name in ['x','y']:
+        step = sampling_cfg["xyz"][axis_name]["step"]
     else:
-        axis_cfg = sampling_cfg["abc"][axis_name]
-    
-    # Build search parameters
-    search_step = axis_cfg["step"] / 4  # Use finer resolution for searching
-    search_min = axis_cfg["min"] - margin * abs(axis_cfg["max"] - axis_cfg["min"])
-    search_max = axis_cfg["max"] + margin * abs(axis_cfg["max"] - axis_cfg["min"])
-    
-    def evaluate_pose_at_val(val):
-        """Helper function to create and evaluate pose at a given axis value"""
-        if axis_name == 'x':
-            pose = (val, 0, z_val, 0, 0, 0)
-        elif axis_name == 'y':
-            pose = (0, val, z_val, 0, 0, 0)
-        elif axis_name == 'a':
-            angle_val = np.deg2rad(val) if deg else val
-            pose = (0, 0, z_val, angle_val, 0, 0)
-        elif axis_name == 'b':
-            angle_val = np.deg2rad(val) if deg else val
-            pose = (0, 0, z_val, 0, angle_val, 0)
-        elif axis_name == 'c':
-            angle_val = np.deg2rad(val) if deg else val
-            pose = (0, 0, z_val, 0, 0, angle_val)
-        
-        result = _eval_pose(pose)
-        is_contact = result[6] > 0.5
-        penetration_depth = result[7] if is_contact else 0.0
-        return is_contact, penetration_depth
-    
-    # Search for bounds by going in both directions from 0
-    min_bound = None
-    max_bound = None
-    
-    # Search in positive direction
-    pos_vals = np.arange(0, search_max + search_step, search_step)
-    for val in pos_vals:
-        is_contact, penetration = evaluate_pose_at_val(val)
-        if is_contact:
-            if penetration <= max_penetration:
-                max_bound = val  # Keep updating as long as penetration is acceptable
-            else:
-                # Penetration exceeds threshold - this becomes the boundary
-                max_bound = val
-                print(f"      {axis_name}={val:.6f}: penetration {penetration:.6f}m exceeds threshold {max_penetration:.6f}m - setting as positive boundary")
-                break
-    
-    # Search in negative direction
-    neg_vals = np.arange(0, search_min - search_step, -search_step)
-    for val in neg_vals:
-        is_contact, penetration = evaluate_pose_at_val(val)
-        if is_contact:
-            if penetration <= max_penetration:
-                min_bound = val  # Keep updating as long as penetration is acceptable
-            else:
-                # Penetration exceeds threshold - this becomes the boundary
-                min_bound = val
-                print(f"      {axis_name}={val:.6f}: penetration {penetration:.6f}m exceeds threshold {max_penetration:.6f}m - setting as negative boundary")
-                break
-    
-    # If no contacts found, return None
-    if min_bound is None and max_bound is None:
-        return None, None
-    
-    # If only one bound found, use zero as the other bound
-    if min_bound is None:
-        min_bound = 0.0
-    if max_bound is None:
-        max_bound = 0.0
-    
-    return min_bound, max_bound
-
+        step = sampling_cfg["abc"][axis_name]["step"]
+    pieces = []
+    for (lo, hi) in intervals:
+        n = max(1, int(np.floor((hi - lo)/step)) + 1)
+        arr = lo + np.arange(n) * step
+        # include hi if close
+        if arr.size == 0 or arr[-1] < hi - 1e-12:
+            arr = np.append(arr, hi)
+        pieces.append(arr)
+    return pieces  # list of 1-D arrays
 
 def adaptive_sample_at_z(z_val, cfg):
     """
@@ -375,52 +311,43 @@ def adaptive_sample_at_z(z_val, cfg):
     # Find bounds for each axis
     bounds = {}
     for axis in ['x', 'y', 'a', 'b', 'c']:
-        min_val, max_val = find_contact_bounds_for_axis(axis, z_val, cfg)
-        if min_val is not None and max_val is not None:
-            bounds[axis] = (min_val, max_val)
-            print(f"      {axis}: [{min_val:.6f}, {max_val:.6f}]")
-        else:
-            # Use original range if no contact found
-            if axis in ['x', 'y']:
-                axis_cfg = sampling_cfg["xyz"][axis]
-            else:
-                axis_cfg = sampling_cfg["abc"][axis]
-            bounds[axis] = (axis_cfg["min"], axis_cfg["max"])
-            print(f"      {axis}: no contact found, using full range [{axis_cfg['min']:.6f}, {axis_cfg['max']:.6f}]")
-    
-    # Build grids for each axis within the found bounds
-    def build_bounded_grid(axis_name, min_val, max_val):
-        if axis_name in ['x', 'y']:
-            step = sampling_cfg["xyz"][axis_name]["step"]
-        else:
-            step = sampling_cfg["abc"][axis_name]["step"]
-        
-        n_steps = int(np.ceil((max_val - min_val) / step)) + 1
-        grid = np.linspace(min_val, max_val, n_steps)
-        return grid
-    
-    x_grid = build_bounded_grid('x', *bounds['x'])
-    y_grid = build_bounded_grid('y', *bounds['y'])
-    a_grid = build_bounded_grid('a', *bounds['a'])
-    b_grid = build_bounded_grid('b', *bounds['b'])
-    c_grid = build_bounded_grid('c', *bounds['c'])
-    
-    # Convert angle grids to radians if needed
-    if deg:
-        a_grid = np.deg2rad(a_grid)
-        b_grid = np.deg2rad(b_grid)
-        c_grid = np.deg2rad(c_grid)
-    
-    # Generate all combinations
+        # min_val, max_val = find_contact_bounds_for_axis(axis, z_val, cfg)
+        intervals = find_contact_intervals_for_axis(axis, z_val, cfg)
+        if not intervals:
+            # Fallback to full range if absolutely no contact found in sweep
+            if axis in ['x','y']: axis_cfg = cfg["sampling"]["xyz"][axis]
+            else:                  axis_cfg = cfg["sampling"]["abc"][axis]
+            intervals = [(axis_cfg["min"], axis_cfg["max"])]  # conservative fallback
+        bounds[axis] = intervals
+
+    sampling_cfg = cfg["sampling"]
+    deg = sampling_cfg.get("degrees", False)
+
+    x_segs = build_grids_from_intervals('x', bounds['x'], sampling_cfg)
+    y_segs = build_grids_from_intervals('y', bounds['y'], sampling_cfg)
+    a_segs = build_grids_from_intervals('a', bounds['a'], sampling_cfg)
+    b_segs = build_grids_from_intervals('b', bounds['b'], sampling_cfg)
+    c_segs = build_grids_from_intervals('c', bounds['c'], sampling_cfg)
+
     poses = []
-    for x in x_grid:
-        for y in y_grid:
-            for a in a_grid:
-                for b in b_grid:
-                    for c in c_grid:
-                        poses.append((x, y, z_val, a, b, c))
-    
-    print(f"    Generated {len(poses)} poses for z={z_val:.6f}")
+    for x_arr in x_segs:
+        for y_arr in y_segs:
+            for a_arr in a_segs:
+                for b_arr in b_segs:
+                    for c_arr in c_segs:
+                        Xa = x_arr
+                        Ya = y_arr
+                        Aa = np.deg2rad(a_arr) if deg else a_arr
+                        Ba = np.deg2rad(b_arr) if deg else b_arr
+                        Ca = np.deg2rad(c_arr) if deg else c_arr
+                        for x in Xa:
+                            for y in Ya:
+                                for a in Aa:
+                                    for b in Ba:
+                                        for c in Ca:
+                                            poses.append((x, y, z_val, a, b, c))
+
+    print(f"    Generated {len(poses)} poses for z={z_val:.6f} (interval-pruned)")
     return poses
 
 
@@ -438,6 +365,136 @@ def sample_pose_grid_adaptive(sampling_cfg):
         all_poses.extend(poses_at_z)
     
     return all_poses
+
+
+def _axis_pose(axis_name, val, z_val, deg):
+    if axis_name == 'x': return (val, 0, z_val, 0, 0, 0)
+    if axis_name == 'y': return (0, val, z_val, 0, 0, 0)
+    if axis_name == 'a': return (0, 0, z_val, np.deg2rad(val) if deg else val, 0, 0)
+    if axis_name == 'b': return (0, 0, z_val, 0, np.deg2rad(val) if deg else val, 0)
+    if axis_name == 'c': return (0, 0, z_val, 0, 0, np.deg2rad(val) if deg else val)
+    raise ValueError(axis_name)
+
+def _is_valid_contact_at(axis_name, val, z_val, cfg):
+    sampling_cfg = cfg["sampling"]
+    deg = sampling_cfg.get("degrees", False)
+    max_pen = sampling_cfg.get("max_penetration_depth", 0.001)
+    pose = _axis_pose(axis_name, val, z_val, deg)
+    x_mm, y_mm, z_mm, a_d, b_d, c_d, contact_flag, contact_metric_mm = _eval_pose(pose)
+    if contact_flag < 0.5:
+        return False  # separated
+    # contact_metric_mm is NEGATIVE of max penetration in mm (see _eval_pose)
+    # Convert to meters and check magnitude against threshold
+    max_pen_m = abs(contact_metric_mm) / 1000.0
+    return max_pen_m <= max_pen
+
+def find_contact_intervals_for_axis(axis_name, z_val, cfg):
+    """
+    Returns a list of (lo, hi) intervals along 'axis_name' at fixed z where contact occurs
+    with penetration <= max_penetration_depth. Intervals are edge-refined & conservatively eroded.
+    """
+    sampling = cfg["sampling"]
+    deg = sampling.get("degrees", False)
+    intr = sampling.get("intervals", {})
+    coarse_factor = max(1, int(intr.get("coarse_factor", 1)))
+    refine_iters  = int(intr.get("edge_refine_iters", 6))
+    erode_steps   = int(intr.get("erode_steps", 1))
+    min_steps     = int(intr.get("min_interval_steps", 2))
+
+    # Axis config + step in *axis units* (deg for angles if degrees=True).
+    if axis_name in ('x','y'):
+        axis_cfg = sampling["xyz"][axis_name]
+    else:
+        axis_cfg = sampling["abc"][axis_name]
+
+    base_step = axis_cfg["step"]
+    sweep_step = base_step / coarse_factor
+    lo, hi = axis_cfg["min"], axis_cfg["max"]
+
+    # 1) coarse sweep & boolean mask
+    vals = np.arange(lo, hi + 0.5*sweep_step, sweep_step)
+    mask = np.zeros(len(vals), dtype=bool)
+    for i, v in enumerate(vals):
+        mask[i] = _is_valid_contact_at(axis_name, v, z_val, cfg)
+
+    # 2) collect contiguous True runs
+    intervals = []
+    i = 0
+    N = len(vals)
+    while i < N:
+        if not mask[i]:
+            i += 1
+            continue
+        start = i
+        while i < N and mask[i]:
+            i += 1
+        end = i - 1  # inclusive
+        lo_coarse = vals[start]
+        hi_coarse = vals[end]
+        # 3) refine both edges by binary search between just-outside and just-inside
+        def refine_edge(v_out, v_in, iters=refine_iters):
+            a, b = v_out, v_in  # f(a)=False, f(b)=True
+            for _ in range(iters):
+                mid = 0.5*(a+b)
+                ok = _is_valid_contact_at(axis_name, mid, z_val, cfg)
+                if ok:
+                    b = mid
+                else:
+                    a = mid
+            return b  # first "True" boundary (inside)
+        # left edge
+        vL_out = lo_coarse - sweep_step
+        vL_in  = lo_coarse
+        if vL_out < lo: vL_out = lo
+        if _is_valid_contact_at(axis_name, vL_out, z_val, cfg):
+            vL_refined = lo_coarse
+        else:
+            vL_refined = refine_edge(vL_out, vL_in)
+        # right edge
+        vR_out = hi_coarse + sweep_step
+        vR_in  = hi_coarse
+        if vR_out > hi: vR_out = hi
+        if _is_valid_contact_at(axis_name, vR_out, z_val, cfg):
+            vR_refined = hi_coarse
+        else:
+            # note: swap roles so False->True transition is inside toward vR_in
+            # use the same function but with (v_in, v_out) mirrored
+            a, b = vR_in, vR_out  # f(a)=True, f(b)=False
+            for _ in range(refine_iters):
+                mid = 0.5*(a+b)
+                ok = _is_valid_contact_at(axis_name, mid, z_val, cfg)
+                if ok:
+                    a = mid
+                else:
+                    b = mid
+            vR_refined = a
+        intervals.append((vL_refined, vR_refined))
+
+    if not intervals:
+        return []
+
+    # 4) merge tiny gaps caused by discretization (optional, simple pass)
+    merged = []
+    intervals.sort()
+    cur_lo, cur_hi = intervals[0]
+    for lo_i, hi_i in intervals[1:]:
+        if lo_i <= cur_hi + 0.25*base_step:
+            cur_hi = max(cur_hi, hi_i)
+        else:
+            merged.append((cur_lo, cur_hi))
+            cur_lo, cur_hi = lo_i, hi_i
+    merged.append((cur_lo, cur_hi))
+
+    # 5) conservative erosion
+    eroded = []
+    erosion = erode_steps * base_step
+    for L, H in merged:
+        L2 = L + erosion
+        H2 = H - erosion
+        if H2 - L2 >= min_steps * base_step:
+            eroded.append((L2, H2))
+
+    return eroded
 
 
 # ---------------------- Parallel worker setup ----------------------
@@ -767,12 +824,86 @@ def _adaptive_sample_at_z_fully_parallel_worker(args):
     return z_val, poses_at_z
 
 
+# ------------------------ Checkpoint functionality ------------------------
+
+def save_checkpoint(checkpoint_path, completed_poses, all_poses, results, remaining_poses=None):
+    """Save current progress to a checkpoint file."""
+    checkpoint_data = {
+        'completed_poses': completed_poses,
+        'all_poses': all_poses,
+        'results': results,
+        'remaining_poses': remaining_poses,
+        'timestamp': time.time()
+    }
+    
+    # Atomic write using temporary file
+    temp_path = checkpoint_path + '.tmp'
+    with open(temp_path, 'wb') as f:
+        pickle.dump(checkpoint_data, f)
+    os.rename(temp_path, checkpoint_path)
+    print(f"[INFO] Checkpoint saved: {len(completed_poses)}/{len(all_poses)} poses completed")
+
+def load_checkpoint(checkpoint_path):
+    """Load progress from a checkpoint file."""
+    if not os.path.exists(checkpoint_path):
+        return None, None, None, None
+    
+    try:
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_data = pickle.load(f)
+        
+        completed_poses = checkpoint_data.get('completed_poses', set())
+        all_poses = checkpoint_data.get('all_poses', [])
+        results = checkpoint_data.get('results', [])
+        remaining_poses = checkpoint_data.get('remaining_poses', None)
+        timestamp = checkpoint_data.get('timestamp', 0)
+        
+        print(f"[INFO] Loaded checkpoint from {time.ctime(timestamp)}")
+        print(f"[INFO] Resuming from {len(completed_poses)}/{len(all_poses)} completed poses")
+        
+        return completed_poses, all_poses, results, remaining_poses
+    except Exception as e:
+        print(f"[WARNING] Failed to load checkpoint: {e}")
+        return None, None, None, None
+
+def cleanup_checkpoint(checkpoint_path):
+    """Remove checkpoint file after successful completion."""
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f"[INFO] Removed checkpoint file: {checkpoint_path}")
+
+def poses_to_tuples(all_poses):
+    """Convert poses to hashable tuples for set operations."""
+    return [tuple(pose) for pose in all_poses]
+
+def randomize_poses_list(all_poses, seed=None):
+    """Randomize the order of poses while preserving the original list structure."""
+    if seed is not None:
+        random.seed(seed)
+    
+    # Create a copy and shuffle
+    randomized_poses = all_poses.copy()
+    random.shuffle(randomized_poses)
+    print(f"[INFO] Randomized pose order for better interruption handling")
+    return randomized_poses
+
+# ------------------------ End checkpoint functionality ------------------------
+
 # ---------------------- Main sweep ----------------------
 
 def main(cfg):
     sampling_cfg = cfg["sampling"]
+    save_cfg = cfg["save"]
     use_adaptive = sampling_cfg.get("adaptive", False)
     used_parallel_adaptive = False  # Initialize this variable
+    
+    # Set up checkpoint path
+    checkpoint_path = save_cfg["checkpoint_path"].format(geometry=cfg["geometry"])
+    save_interval = save_cfg.get("save_interval", 1000)
+    randomize_poses = save_cfg.get("randomize_poses", True)
+    
+    # Try to load existing checkpoint
+    completed_poses, checkpoint_all_poses, checkpoint_results, checkpoint_remaining_poses = load_checkpoint(checkpoint_path)
     
     if use_adaptive:
         print("[INFO] Using adaptive per-slice sampling (AABB-style)")
@@ -833,6 +964,11 @@ def main(cfg):
         
         total = len(all_poses)
         print(f"[INFO] Total adaptive samples: {total}")
+        
+        # Randomize poses if enabled
+        if randomize_poses:
+            all_poses = randomize_poses_list(all_poses, seed=42)  # Use fixed seed for reproducibility
+            
         pose_iter = iter(all_poses)
     else:
         print("[INFO] Using traditional grid sampling")
@@ -852,9 +988,39 @@ def main(cfg):
         total = len(xs) * len(ys) * len(zs) * len(a_vals) * len(b_vals) * len(c_vals)
         print(f"[INFO] Total samples: {total}")
         
-        # Prepare iterator of pose tuples
-        pose_iter = ((x, y, z, r, p, yv) for x in xs for y in ys for z in zs
-                                      for r in a_vals for p in b_vals for yv in c_vals)
+        # Generate all poses as a list for checkpointing
+        all_poses = [(x, y, z, r, p, yv) for x in xs for y in ys for z in zs
+                     for r in a_vals for p in b_vals for yv in c_vals]
+        
+        # Randomize poses if enabled
+        if randomize_poses:
+            all_poses = randomize_poses_list(all_poses, seed=42)  # Use fixed seed for reproducibility
+
+    # Check for checkpoint compatibility
+    if completed_poses is not None and checkpoint_all_poses is not None:
+        # Verify that the current pose set matches the checkpoint
+        current_pose_tuples = set(poses_to_tuples(all_poses))
+        checkpoint_pose_tuples = set(poses_to_tuples(checkpoint_all_poses))
+        
+        if current_pose_tuples == checkpoint_pose_tuples:
+            print(f"[INFO] Checkpoint compatible - resuming from {len(completed_poses)}/{len(all_poses)} poses")
+            # Filter out already completed poses
+            remaining_poses = [pose for pose in all_poses if tuple(pose) not in completed_poses]
+            pose_iter = iter(remaining_poses)
+            total_remaining = len(remaining_poses)
+            rows = checkpoint_results.copy()
+        else:
+            print("[WARNING] Checkpoint not compatible with current configuration - starting fresh")
+            completed_poses = set()
+            rows = []
+            pose_iter = iter(all_poses)
+            total_remaining = total
+    else:
+        # No checkpoint or failed to load
+        completed_poses = set()
+        rows = []
+        pose_iter = iter(all_poses)
+        total_remaining = total
 
     # Parallel or serial execution for pose evaluation
     par = cfg.get("parallel", {})
@@ -873,17 +1039,22 @@ def main(cfg):
     
     use_parallel = use_parallel_poses
 
-    rows = []
-
+    # Choose processing method based on configuration
     if use_parallel:
-        # Use "spawn" for safety (fork can inherit non-fork-safe handles).
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=workers, initializer=_worker_init, initargs=(cfg,)) as pool:
-            for out in tqdm(pool.imap(_eval_pose, pose_iter, chunksize=chunksize),
-                            total=total, desc="Sampling poses"):
-                rows.append(out)
+        checkpoint_method = par.get("checkpoint_method", "batched")
+        print(f"[INFO] Using parallel processing with {workers} workers and {checkpoint_method} checkpointing")
+        
+        if checkpoint_method == "callback":
+            # Use callback-based parallel processing
+            rows = process_poses_with_parallel_checkpointing(all_poses, completed_poses, rows, cfg)
+        else:
+            # Use batched parallel processing (default, more reliable)
+            rows = process_poses_with_batched_parallel_checkpointing(all_poses, completed_poses, rows, cfg)
+        
     else:
-        # Serial path (debug or adaptive)
+        print("[INFO] Using serial processing with checkpointing")
+        
+        # Serial execution with checkpointing
         if not use_adaptive:
             _worker_init(cfg)  # initialize globals in this (main) process
         elif use_adaptive and not used_parallel_adaptive:
@@ -892,9 +1063,38 @@ def main(cfg):
         else:
             # For parallel adaptive sampling, we need to reinitialize for pose evaluation
             _worker_init(cfg)
-            
-        for pose in tqdm(pose_iter, total=total, desc="Sampling poses (serial)"):
-            rows.append(_eval_pose(pose))
+        
+        # Filter out already completed poses
+        remaining_poses = [pose for pose in all_poses if tuple(pose) not in completed_poses]
+        total_remaining = len(remaining_poses)
+        
+        print(f"[INFO] Processing {total_remaining} remaining poses with periodic checkpointing every {save_interval} poses")
+        
+        pose_count = 0
+        try:
+            for pose in tqdm(remaining_poses, desc="Sampling poses (serial with checkpointing)"):
+                result = _eval_pose(pose)
+                rows.append(result)
+                completed_poses.add(tuple(pose))
+                pose_count += 1
+                
+                # Save checkpoint periodically
+                if pose_count % save_interval == 0:
+                    save_checkpoint(checkpoint_path, completed_poses, all_poses, rows, remaining_poses)
+                    
+                    # Also save intermediate CSV
+                    _save_intermediate_csv(rows, cfg, suffix=f"_partial_{len(rows)}")
+                    
+        except KeyboardInterrupt:
+            print(f"\n[INFO] Interrupted by user. Saving checkpoint...")
+            save_checkpoint(checkpoint_path, completed_poses, all_poses, rows, remaining_poses)
+            _save_intermediate_csv(rows, cfg, suffix=f"_interrupted_{len(rows)}")
+            raise
+        except Exception as e:
+            print(f"\n[ERROR] Exception occurred: {e}. Saving checkpoint...")
+            save_checkpoint(checkpoint_path, completed_poses, all_poses, rows, remaining_poses)
+            _save_intermediate_csv(rows, cfg, suffix=f"_error_{len(rows)}")
+            raise
 
     # Convert to array and save
     results = np.array(rows, dtype=float)
@@ -922,7 +1122,10 @@ def main(cfg):
         for r in results_with_logmaps:
             w.writerow([f"{v:.10g}" for v in r])
 
-    print(f"[INFO] Saved CSV to {csv_path}")
+    print(f"[INFO] Saved final CSV to {csv_path}")
+    
+    # Clean up checkpoint file on successful completion
+    cleanup_checkpoint(checkpoint_path)
     
     if use_adaptive:
         # Print some statistics about the adaptive sampling
@@ -931,6 +1134,210 @@ def main(cfg):
         if len(contact_results) > 0:
             print(f"[INFO] Contact efficiency: {len(contact_results)/len(results)*100:.1f}%")
 
+
+def _save_intermediate_csv(rows, cfg, suffix=""):
+    """Save intermediate results to CSV file."""
+    if not rows:
+        return
+        
+    results = np.array(rows, dtype=float)
+    
+    # Calculate logmap representations
+    angles_deg = results[:, 3:6]  # columns a, b, c in degrees
+    logmaps = R.from_euler('xyz', angles_deg, degrees=True).as_rotvec()  # shape (N,3), in radians
+    results_with_logmaps = np.hstack([results, logmaps])
+    
+    # Create intermediate filename
+    base_path = cfg["save"]["csv_path"].format(geometry=cfg["geometry"])
+    name, ext = os.path.splitext(base_path)
+    intermediate_path = f"{name}{suffix}{ext}"
+    
+    with open(intermediate_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["x", "y", "z", "a", "b", "c", "contact", "contact_distance", "wx", "wy", "wz"])
+        w.writerow(["units: mm", "mm", "mm", "deg", "deg", "deg", "0/1",
+                    "max_penetration_depth_if_contact_else_min_separation_distance_mm", "rad", "rad", "rad"])
+        for r in results_with_logmaps:
+            w.writerow([f"{v:.10g}" for v in r])
+    
+    print(f"[INFO] Saved intermediate CSV to {intermediate_path} ({len(results)} poses)")
+
+
+def process_poses_with_parallel_checkpointing(all_poses, completed_poses, checkpoint_results, cfg):
+    """
+    Process poses in parallel with periodic checkpointing.
+    Returns list of results for all poses.
+    """
+    import threading
+    import queue
+    
+    save_cfg = cfg["save"]
+    checkpoint_path = save_cfg["checkpoint_path"].format(geometry=cfg["geometry"])
+    save_interval = save_cfg.get("save_interval", 1000)
+    
+    # Filter out already completed poses
+    remaining_poses = [pose for pose in all_poses if tuple(pose) not in completed_poses]
+    
+    if not remaining_poses:
+        print("[INFO] All poses already completed!")
+        return checkpoint_results
+    
+    # Set up parallel processing
+    par = cfg.get("parallel", {})
+    workers = int(par.get("workers") or 0) or mp.cpu_count()
+    chunksize = int(par.get("chunksize", 16))
+    
+    print(f"[INFO] Processing {len(remaining_poses)} remaining poses with {workers} workers")
+    
+    # Shared state for checkpointing
+    results_lock = threading.Lock()
+    all_results = checkpoint_results.copy()
+    completed_poses_set = completed_poses.copy()
+    checkpoint_counter = len(checkpoint_results)
+    
+    def result_callback(result_with_pose):
+        """Callback for when a pose is completed - handles checkpointing"""
+        nonlocal checkpoint_counter
+        
+        result, pose = result_with_pose
+        
+        with results_lock:
+            all_results.append(result)
+            completed_poses_set.add(tuple(pose))
+            checkpoint_counter += 1
+            
+            # Save checkpoint periodically
+            if checkpoint_counter % save_interval == 0:
+                save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+                _save_intermediate_csv(all_results, cfg, suffix=f"_partial_{len(all_results)}")
+    
+    def error_callback(error):
+        """Callback for errors"""
+        print(f"[ERROR] Worker error: {error}")
+        # Save checkpoint on error
+        with results_lock:
+            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+            _save_intermediate_csv(all_results, cfg, suffix=f"_error_{len(all_results)}")
+    
+    try:
+        # Use "spawn" for safety
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=workers, initializer=_worker_init, initargs=(cfg,)) as pool:
+            
+            # Submit all remaining poses
+            async_results = []
+            for pose in remaining_poses:
+                async_result = pool.apply_async(
+                    _eval_pose_with_metadata, 
+                    (pose,),
+                    callback=result_callback,
+                    error_callback=error_callback
+                )
+                async_results.append(async_result)
+            
+            # Monitor progress with tqdm
+            with tqdm(total=len(remaining_poses), desc="Processing poses (parallel with checkpointing)") as pbar:
+                completed_count = 0
+                while completed_count < len(remaining_poses):
+                    time.sleep(0.1)  # Check every 100ms
+                    
+                    # Count completed results
+                    new_completed_count = sum(1 for ar in async_results if ar.ready())
+                    if new_completed_count > completed_count:
+                        pbar.update(new_completed_count - completed_count)
+                        completed_count = new_completed_count
+            
+            # Wait for all to complete
+            for ar in async_results:
+                ar.wait()
+                
+    except KeyboardInterrupt:
+        print(f"\n[INFO] Interrupted by user. Saving checkpoint...")
+        with results_lock:
+            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+            _save_intermediate_csv(all_results, cfg, suffix=f"_interrupted_{len(all_results)}")
+        raise
+    except Exception as e:
+        print(f"\n[ERROR] Exception occurred: {e}. Saving checkpoint...")
+        with results_lock:
+            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+            _save_intermediate_csv(all_results, cfg, suffix=f"_error_{len(all_results)}")
+        raise
+    
+    return all_results
+
+
+def _eval_pose_with_metadata(pose):
+    """Wrapper that returns both result and pose for callback identification"""
+    result = _eval_pose(pose)
+    return result, pose
+
+
+def process_poses_with_batched_parallel_checkpointing(all_poses, completed_poses, checkpoint_results, cfg):
+    """
+    Alternative approach: Process poses in batches for more predictable checkpointing.
+    """
+    save_cfg = cfg["save"]
+    checkpoint_path = save_cfg["checkpoint_path"].format(geometry=cfg["geometry"])
+    save_interval = save_cfg.get("save_interval", 1000)
+    
+    # Filter out already completed poses
+    remaining_poses = [pose for pose in all_poses if tuple(pose) not in completed_poses]
+    
+    if not remaining_poses:
+        print("[INFO] All poses already completed!")
+        return checkpoint_results
+    
+    # Set up parallel processing
+    par = cfg.get("parallel", {})
+    workers = int(par.get("workers") or 0) or mp.cpu_count()
+    chunksize = int(par.get("chunksize", 16))
+    
+    # Use smaller batch size for more frequent checkpointing
+    batch_size = min(save_interval, len(remaining_poses))
+    
+    print(f"[INFO] Processing {len(remaining_poses)} remaining poses with {workers} workers in batches of {batch_size}")
+    
+    all_results = checkpoint_results.copy()
+    completed_poses_set = completed_poses.copy()
+    
+    try:
+        # Use "spawn" for safety
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=workers, initializer=_worker_init, initargs=(cfg,)) as pool:
+            
+            # Process in batches
+            for batch_start in tqdm(range(0, len(remaining_poses), batch_size), desc="Processing batches"):
+                batch_end = min(batch_start + batch_size, len(remaining_poses))
+                batch_poses = remaining_poses[batch_start:batch_end]
+                
+                # Process this batch in parallel
+                batch_results = pool.map(_eval_pose, batch_poses, chunksize=chunksize)
+                
+                # Add to results
+                all_results.extend(batch_results)
+                for pose in batch_poses:
+                    completed_poses_set.add(tuple(pose))
+                
+                # Save checkpoint after each batch
+                save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+                
+                # Save intermediate CSV periodically
+                if len(all_results) % save_interval == 0 or batch_end == len(remaining_poses):
+                    _save_intermediate_csv(all_results, cfg, suffix=f"_partial_{len(all_results)}")
+                
+    except KeyboardInterrupt:
+        print(f"\n[INFO] Interrupted by user. Saving checkpoint...")
+        save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+        _save_intermediate_csv(all_results, cfg, suffix=f"_interrupted_{len(all_results)}")
+        raise
+    except Exception as e:
+        print(f"\n[ERROR] Exception occurred: {e}. Saving checkpoint...")
+        save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+        _save_intermediate_csv(all_results, cfg, suffix=f"_error_{len(all_results)}")
+        raise
+    
+    return all_results
 
 if __name__ == "__main__":
     main(config)

@@ -20,3 +20,5 @@ data_generation/*.npz
 wandb 
 model_training/checkpoints/*.pth
 *.png 
+*.pkl
+*.tmp 

@@ -50,7 +50,7 @@ class TrainConfig:
     pin_memory: bool = True
 
     # use full dataset by default
-    sample_frac: float = 0.01 
+    sample_frac: float = 0.25
 
     # perturbation ranges: x,y,z in data units (e.g., mm); w* given in degrees
     transform_ranges = {"x": 5.0, "y": 5.0, "z": 5.0, "wx_deg": 5.0, "wy_deg": 5.0, "wz_deg": 5.0}
@@ -315,6 +315,10 @@ def main():
 
     # --- Load data
     df = pd.read_csv(cfg.data_path)
+    # filter df such that contact flag is 1
+    if 'contact' in df.columns:
+        df = df[df['contact'] == 1].reset_index(drop=True)    
+
     expected = ["x","y","z","wx","wy","wz"]
     for col in expected:
         if col not in df.columns:
@@ -325,7 +329,7 @@ def main():
         print("[INFO] Converted x,y,z from meters to millimeters.")
 
     if cfg.sample_frac < 1.0:
-        df = df.sample(frac=cfg.sample_frac, random_state=123).reset_index(drop=True)
+        df = df.sample(frac=cfg.sample_frac).reset_index(drop=True)
 
     poses = torch.tensor(df[["x","y","z","wx","wy","wz"]].values.astype(np.float32))
     corpus_np = np.ascontiguousarray(poses.numpy().astype(np.float32))
