@@ -23,3 +23,4 @@ model_training/checkpoints/*.pth
 *.pkl
 *.tmp 
 state_estimation/__pycache__
+state_estimation/compare_models_out 

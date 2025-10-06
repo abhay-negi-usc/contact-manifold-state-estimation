@@ -664,7 +664,7 @@ def plot_learning_rate_history(lr_history, title_prefix="Learning Rate"):
     plt.tight_layout()
     plt.show()
 
-def main(seed=42): 
+def main(seed=1): 
     # Set global seed for reproducibility
     set_seed(seed)
     print(f"Running main() with seed={seed} for reproducible testing")
@@ -672,7 +672,8 @@ def main(seed=42):
     # example usage 
     config = {
         'contact_model_path': '/home/rp/abhay_ws/cicp/checkpoints/extrusion_run_4_best_NN_model_xyzabc.pth', 
-        'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_1.npy',
+        # 'contact_model_path': '/home/rp/abhay_ws/contact-manifold-state-estimation/model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth', 
+        'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_0.npy',
         'device': 'cuda' if torch.cuda.is_available() else 'cpu', 
     }
 
@@ -693,7 +694,7 @@ def main(seed=42):
     pose_h_p = torch_matrix_to_pose_xyzabc(torch.tensor(tf_h_p, dtype=torch.float32)).cpu().numpy()
     
     cpm = ContactPoseManifold(geometry="gear") 
-    cpm.load_model_from_path(config['contact_model_path'])
+    cpm.load_model_from_path(config['contact_model_path'], layer_sizes=[6, 4096, 4096, 4096, 4096, 6])
 
     # print("\n" + "="*50)
     # print("Testing estimate_holePose_and_inHandPose() - joint estimation")
@@ -744,16 +745,16 @@ def main(seed=42):
         observations=pose_h_p,
         config=config,
         max_samples=None,
-        max_it=10_000, 
-        lr=4e-1, 
+        max_it=1000, 
+        lr=1e-1, 
         optimizer_type='adam',
-        convergence_tolerance=1e-2,
-        convergence_window=10,
-        param_change_tolerance=1e-3,
+        # convergence_tolerance=1e-2,
+        # convergence_window=10,
+        # param_change_tolerance=1e-3,
         seed=seed,  # Pass seed for reproducible estimation
         lr_decay_type='exponential',  # Enable exponential learning rate decay
         lr_decay_rate=0.98,  # Decay rate (reduce LR by 2% each step)
-        lr_decay_step=10_000  # Decay every 10 iterations (only used for 'step' decay)
+        lr_decay_step=100  # Decay every 10 iterations (only used for 'step' decay)
     ) 
     tf_H_h_est_hole_only, pose_H_h_est_hole_only, pose_H_h_history_hole_only, loss_history_hole_only, lr_history_hole_only = ret_hole_only
     time_end = time.time()

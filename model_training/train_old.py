@@ -127,19 +127,19 @@ class OptimizedPoseRegressor(nn.Module):
 # === Training Loop ===
 def main():
     geometry = "extrusion"
-    run = 1
+    run = 2
     data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
-    layer_sizes = [6, 2048, 2048, 2048, 2048, 6]
+    layer_sizes = [6, 4096, 4096, 4096, 4096, 6]
     transform_ranges = {"x": 10, "y": 10, "z": 10, "a": 10, "b": 10, "c": 10}
-    resume_checkpoint = "./model_training/checkpoints/extrusion_run_1_best_NN_model_xyzabc.pth"
+    resume_checkpoint = "./model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth"
 
     wandb.init(
         project='contact-manifold-learning',
         entity='abhay-negi-usc-university-of-southern-california',
         config={
-            "learning_rate": 1e-6,
+            "learning_rate": 1e-4,
             "epochs": 1_000_000_000,
-            "batch_size": 2**12,  # 4096 - optimal from benchmark
+            "batch_size": 2**14,  # 4096 - optimal from benchmark
             "layer_sizes": layer_sizes,
             "transform_ranges": transform_ranges,
             "resume_checkpoint": resume_checkpoint,
@@ -147,8 +147,8 @@ def main():
             "flag_force_save": False,
             "samples_per_epoch": 50000,  # Reduced for faster epochs
             "num_workers": 0,  # 0 workers is fastest based on benchmark
-            "override_lr_on_resume": True,  # Set to True to use new learning rate when resuming
-            "reset_scheduler_on_resume": True,  # Set to True to reset scheduler when resuming
+            "override_lr_on_resume": False,  # Set to True to use new learning rate when resuming
+            "reset_scheduler_on_resume": False,  # Set to True to reset scheduler when resuming
         }
     )
     config = wandb.config

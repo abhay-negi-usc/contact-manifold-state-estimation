@@ -10,7 +10,7 @@ from utils.pose_utils import torch_pose_xyzabc_to_matrix
 #--- CONFIG ---# 
 # filepath_sim_data = "/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/cross_data/cross_data_merged/processed_data/cross_contact_poses_mujoco.csv"
 # filepath_real_data = "/home/rp/dhanush_ws/sunrise-wrapper/contact_maps/cross_round_tight/CASE_cross_round_tight_aut_map_4.pkl" 
-filepath_sim_data = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_pose_sweep_contacts_adaptive.csv"
+filepath_sim_data = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
 filepath_real_data = "/home/rp/dhanush_ws/sunrise-wrapper/contact_maps/extrusion_rounded/zfilt_extrusion_rounded_aut_map_1.pkl" 
 
 #--- LOAD DATA ---# 
@@ -26,7 +26,7 @@ df_sim = df_sim.drop(index=0).reset_index(drop=True) # remove units row
 # convert from strings to floats 
 df_sim[['x', 'y', 'z', 'a', 'b', 'c']] = df_sim[['x', 'y', 'z', 'a', 'b', 'c']].astype(float)
 df_sim[['x', 'y', 'z']] = df_sim[['x', 'y', 'z']] * 1000.0 # m to mm
-df_sim[['a', 'b', 'c']] = df_sim[['a', 'b', 'c']] * (180.0 / np.pi) # rad to deg
+df_sim[['a', 'b', 'c']] = df_sim[['a', 'b', 'c']] #* (180.0 / np.pi) # rad to deg
 print(f"\n\nConverted sim data to mm and degrees.\n\n")
 # END OF FIXME 
 
