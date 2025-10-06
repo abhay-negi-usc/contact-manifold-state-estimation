@@ -68,7 +68,7 @@ config = {
     # Parallel execution (can be used for both traditional and adaptive sampling)
     "parallel": {
         "enabled": True,
-        "workers": 16,       # 0 or None => use mp.cpu_count()
+        "workers": 20,       # 0 or None => use mp.cpu_count()
         "chunksize": 8,     # tune for throughput; larger = fewer IPC calls
         "adaptive_parallel": True,  # enable parallelization for adaptive sampling
         "z_slice_parallel": False,   # parallelize across z-slices
@@ -935,15 +935,19 @@ def main(cfg):
             ctx = mp.get_context("spawn")
             z_tasks = [(z_val, cfg, use_axis_parallel) for z_val in z_grid]
             
-            with ctx.Pool(processes=min(workers, len(z_grid)), initializer=_worker_init, initargs=(cfg,)) as pool:
-                z_results = []
-                for i, (z_val, poses_at_z) in enumerate(tqdm(
-                    pool.imap(_adaptive_sample_at_z_fully_parallel_worker, z_tasks),
-                    total=len(z_tasks),
-                    desc="Processing z-slices in parallel"
-                )):
-                    print(f"  Completed z-slice {i+1}/{len(z_grid)}: z={z_val:.6f} with {len(poses_at_z)} poses")
-                    all_poses.extend(poses_at_z)
+            try: 
+                with ctx.Pool(processes=min(workers, len(z_grid)), initializer=_worker_init, initargs=(cfg,)) as pool:
+                    z_results = []
+                    for i, (z_val, poses_at_z) in enumerate(tqdm(
+                        pool.imap(_adaptive_sample_at_z_fully_parallel_worker, z_tasks),
+                        total=len(z_tasks),
+                        desc="Processing z-slices in parallel"
+                    )):
+                        print(f"  Completed z-slice {i+1}/{len(z_grid)}: z={z_val:.6f} with {len(poses_at_z)} poses")
+                        all_poses.extend(poses_at_z)
+            except Exception as e:
+                raise RuntimeError(f"Error during parallel adaptive sampling: {e}")
+            
             used_parallel_adaptive = True
         else:
             print("[INFO] Using serial adaptive sampling")
@@ -955,8 +959,11 @@ def main(cfg):
                 if use_axis_parallel:
                     # Use axis parallelization even in serial z-slice mode
                     ctx = mp.get_context("spawn")
-                    with ctx.Pool(processes=min(5, workers), initializer=_worker_init, initargs=(cfg,)) as axis_pool:
-                        poses_at_z = adaptive_sample_at_z_fully_parallel(z_val, cfg, axis_pool=axis_pool)
+                    try: 
+                        with ctx.Pool(processes=min(5, workers), initializer=_worker_init, initargs=(cfg,)) as axis_pool:
+                            poses_at_z = adaptive_sample_at_z_fully_parallel(z_val, cfg, axis_pool=axis_pool)
+                    except Exception as e:
+                        raise RuntimeError(f"Error during axis-parallel adaptive sampling: {e}")
                 else:
                     poses_at_z = adaptive_sample_at_z(z_val, cfg)
                 all_poses.extend(poses_at_z)
@@ -1162,110 +1169,85 @@ def _save_intermediate_csv(rows, cfg, suffix=""):
     
     print(f"[INFO] Saved intermediate CSV to {intermediate_path} ({len(results)} poses)")
 
-
 def process_poses_with_parallel_checkpointing(all_poses, completed_poses, checkpoint_results, cfg):
     """
-    Process poses in parallel with periodic checkpointing.
-    Returns list of results for all poses.
+    Parallel, streaming processing with periodic checkpointing.
+    - No apply_async / callbacks (avoids extra SemLock objects).
+    - Single long-lived pool.
+    - Checkpoints after every `save_interval` results (and at the end/exception).
     """
-    import threading
-    import queue
-    
+    import os
+    import sys
+    import time
+    import multiprocessing as mp
+    from tqdm import tqdm
+
     save_cfg = cfg["save"]
     checkpoint_path = save_cfg["checkpoint_path"].format(geometry=cfg["geometry"])
-    save_interval = save_cfg.get("save_interval", 1000)
-    
+    save_interval = int(save_cfg.get("save_interval", 1000))
+
     # Filter out already completed poses
     remaining_poses = [pose for pose in all_poses if tuple(pose) not in completed_poses]
-    
     if not remaining_poses:
         print("[INFO] All poses already completed!")
         return checkpoint_results
-    
-    # Set up parallel processing
-    par = cfg.get("parallel", {})
-    workers = int(par.get("workers") or 0) or mp.cpu_count()
-    chunksize = int(par.get("chunksize", 16))
-    
-    print(f"[INFO] Processing {len(remaining_poses)} remaining poses with {workers} workers")
-    
-    # Shared state for checkpointing
-    results_lock = threading.Lock()
-    all_results = checkpoint_results.copy()
-    completed_poses_set = completed_poses.copy()
-    checkpoint_counter = len(checkpoint_results)
-    
-    def result_callback(result_with_pose):
-        """Callback for when a pose is completed - handles checkpointing"""
-        nonlocal checkpoint_counter
-        
-        result, pose = result_with_pose
-        
-        with results_lock:
-            all_results.append(result)
-            completed_poses_set.add(tuple(pose))
-            checkpoint_counter += 1
-            
-            # Save checkpoint periodically
-            if checkpoint_counter % save_interval == 0:
-                save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
-                _save_intermediate_csv(all_results, cfg, suffix=f"_partial_{len(all_results)}")
-    
-    def error_callback(error):
-        """Callback for errors"""
-        print(f"[ERROR] Worker error: {error}")
-        # Save checkpoint on error
-        with results_lock:
-            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
-            _save_intermediate_csv(all_results, cfg, suffix=f"_error_{len(all_results)}")
-    
+
+    # Parallel settings
+    par_cfg   = cfg.get("parallel", {})
+    workers   = int(par_cfg.get("workers", max(1, os.cpu_count() or 1)))
+    chunksize = int(par_cfg.get("chunksize", 1))
+
+    # Prefer 'fork' on Linux to minimize semaphore churn; fall back otherwise.
+    start_method = par_cfg.get("start_method")
+    if start_method is None:
+        if sys.platform.startswith("linux"):
+            start_method = "fork"
+        else:
+            start_method = "spawn"
+
+    ctx = mp.get_context(start_method)
+
+    # Bookkeeping
+    completed_poses_set = set(completed_poses) if not isinstance(completed_poses, set) else completed_poses
+    all_results = list(checkpoint_results) if checkpoint_results is not None else []
+    processed_since_save = 0
+
+    # A small helper so we always persist progress the same way
+    def _do_checkpoint():
+        save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
+        # Optional CSV snapshot to mirror your prior behavior
+        _save_intermediate_csv(all_results, cfg, suffix=f"_partial_{len(all_results)}")
+
     try:
-        # Use "spawn" for safety
-        ctx = mp.get_context("spawn")
         with ctx.Pool(processes=workers, initializer=_worker_init, initargs=(cfg,)) as pool:
-            
-            # Submit all remaining poses
-            async_results = []
-            for pose in remaining_poses:
-                async_result = pool.apply_async(
-                    _eval_pose_with_metadata, 
-                    (pose,),
-                    callback=result_callback,
-                    error_callback=error_callback
-                )
-                async_results.append(async_result)
-            
-            # Monitor progress with tqdm
-            with tqdm(total=len(remaining_poses), desc="Processing poses (parallel with checkpointing)") as pbar:
-                completed_count = 0
-                while completed_count < len(remaining_poses):
-                    time.sleep(0.1)  # Check every 100ms
-                    
-                    # Count completed results
-                    new_completed_count = sum(1 for ar in async_results if ar.ready())
-                    if new_completed_count > completed_count:
-                        pbar.update(new_completed_count - completed_count)
-                        completed_count = new_completed_count
-            
-            # Wait for all to complete
-            for ar in async_results:
-                ar.wait()
-                
+            # Stream results as they finish; each item is (result, pose)
+            it = pool.imap_unordered(_eval_pose_with_metadata, remaining_poses, chunksize=chunksize)
+
+            with tqdm(total=len(remaining_poses), desc="Processing poses (parallel + checkpointing)", smoothing=0) as pbar:
+                for result, pose in it:
+                    all_results.append(result)
+                    completed_poses_set.add(tuple(pose))
+                    processed_since_save += 1
+                    pbar.update(1)
+
+                    if processed_since_save >= save_interval:
+                        _do_checkpoint()
+                        processed_since_save = 0
+
+        # Final checkpoint at normal completion
+        if processed_since_save > 0 or len(all_results) != len(checkpoint_results or []):
+            _do_checkpoint()
+
     except KeyboardInterrupt:
-        print(f"\n[INFO] Interrupted by user. Saving checkpoint...")
-        with results_lock:
-            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
-            _save_intermediate_csv(all_results, cfg, suffix=f"_interrupted_{len(all_results)}")
+        print("\n[INFO] Interrupted by user. Saving checkpoint...")
+        _do_checkpoint()
         raise
     except Exception as e:
         print(f"\n[ERROR] Exception occurred: {e}. Saving checkpoint...")
-        with results_lock:
-            save_checkpoint(checkpoint_path, completed_poses_set, all_poses, all_results, remaining_poses)
-            _save_intermediate_csv(all_results, cfg, suffix=f"_error_{len(all_results)}")
+        _do_checkpoint()
         raise
-    
-    return all_results
 
+    return all_results
 
 def _eval_pose_with_metadata(pose):
     """Wrapper that returns both result and pose for callback identification"""
@@ -1340,4 +1322,12 @@ def process_poses_with_batched_parallel_checkpointing(all_poses, completed_poses
     return all_results
 
 if __name__ == "__main__":
+    import multiprocessing as mp, sys
+    try:
+        if sys.platform.startswith("linux"):
+            mp.set_start_method("fork", force=True)
+        else:
+            mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass  # already set
     main(config)

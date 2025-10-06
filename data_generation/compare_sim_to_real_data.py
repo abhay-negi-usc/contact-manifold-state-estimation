@@ -5,7 +5,7 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 import torch
 import matplotlib.pyplot as plt
-from utils.pose_utils import torch_pose_xyzabc_to_matrix
+from utils.pose_utils import torch_pose_xyzabc_to_matrix, torch_matrix_to_pose_xyzabc
 
 #--- CONFIG ---# 
 # filepath_sim_data = "/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/cross_data/cross_data_merged/processed_data/cross_contact_poses_mujoco.csv"
@@ -19,6 +19,25 @@ df_real = pd.read_pickle(filepath_real_data)
 print(f"Loaded {len(df_sim)} rows of sim data from {filepath_sim_data}")
 print(f"Loaded {len(df_real)} rows of real data from {filepath_real_data}")
 print("\n")
+
+# transform real data frame origin from peg base to peg tip and hole top to hole bottom 
+print("Transforming real data frame origin from peg base to peg tip and hole top to hole bottom...") 
+for idx, row in df_real.iterrows():
+    tf_H_P = torch_pose_xyzabc_to_matrix(torch.tensor(row[['x', 'y', 'z', 'a', 'b', 'c']].to_numpy().reshape(1,6), dtype=torch.float32))
+    # translate peg frame origin from base to tip (25mm along z)
+    transform_peg = torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,-0.025],[0,0,0,1]], dtype=torch.float32) # 25mm offset in z
+    # translate hole frame origin from top to bottom (25mm along z)
+    transform_hole = torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,-0.025],[0,0,0,1]], dtype=torch.float32) # 25mm offset in z
+    transform_hole_inv = torch.inverse(transform_hole)
+    tf_H_P_transformed = transform_hole_inv @ tf_H_P @ transform_peg
+    pose_H_P_transformed = torch_matrix_to_pose_xyzabc(tf_H_P_transformed).numpy().reshape(6)
+    df_real.at[idx,'x'] = pose_H_P_transformed[0]
+    df_real.at[idx,'y'] = pose_H_P_transformed[1]
+    df_real.at[idx,'z'] = pose_H_P_transformed[2]
+    df_real.at[idx,'a'] = pose_H_P_transformed[3]
+    df_real.at[idx,'b'] = pose_H_P_transformed[4]
+    df_real.at[idx,'c'] = pose_H_P_transformed[5]
+print("Transformed real data frame origins.\n")
 
 # NOTE: FIXME 
 # delete row 0 and reset index

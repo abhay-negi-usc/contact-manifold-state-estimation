@@ -675,9 +675,23 @@ def main(seed=1):
         # 'contact_model_path': '/home/rp/abhay_ws/contact-manifold-state-estimation/model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth', 
         'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_0.npy',
         'device': 'cuda' if torch.cuda.is_available() else 'cpu', 
+        'sim_data': True 
     }
 
     tf_H_P = read_observation(config['observation_path'])  
+
+    if config['sim_data']:
+        # updating frame of observations from base of peg to tip of peg 
+        for i, pose_H_P_i in enumerate(tf_H_P): 
+            pose_H_P_i = torch.tensor(pose_H_P_i, dtype=torch.float32)
+            tf_H_P_i = torch_pose_xyzabc_to_matrix(pose_H_P_i.unsqueeze(0)).squeeze(0)
+            transform_peg = torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,-25],[0,0,0,1]], dtype=torch.float32) # 25mm offset in z
+            transform_hole = torch.tensor([[1,0,0,0],[0,1,0,0],[0,0,1,-25],[0,0,0,1]], dtype=torch.float32) # 25mm offset in z
+            transform_hole_inv = torch.inverse(transform_hole)
+            tf_H_P_transformed = transform_hole_inv @ tf_H_P_i @ transform_peg
+            pose_H_P_transformed = torch_matrix_to_pose_xyzabc(tf_H_P_transformed.unsqueeze(0)).cpu().numpy()
+            tf_H_P[i] = pose_H_P_transformed.flatten()
+
     tf_h_p, tf_H_h, tf_P_p = offset_observation(
         max_hole_pose_offsets=np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0]), 
         # max_in_hand_pose_offsets=np.array([0, 10.0, 10.0, 0, 0, 10.0]),
