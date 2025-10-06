@@ -4,6 +4,21 @@ import torch
 from utils.pose_utils import torch_matrix_to_pose_xyzabc, torch_pose_xyzabc_to_matrix
 from cicp.icp_manifold import ContactPoseManifold 
 import matplotlib.pyplot as plt
+import time
+import random
+
+def set_seed(seed=42):
+    """Set random seeds for reproducible results across numpy, torch, and random modules."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    # For deterministic behavior in CUDA operations
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to {seed} for reproducible results")
 
 class ForwardModel(torch.nn.Module):
     def __init__(self, contact_model):
@@ -61,10 +76,35 @@ def estimate_holePose_and_inHandPose(
         optimizer_type='adam', 
         gradient_noise_std=0.02, 
         max_samples=None, 
-        save_results=False
+        seed=None,
+        lr_decay_type='none',
+        lr_decay_rate=0.95,
+        lr_decay_step=100
     ):
+    """
+    Estimate both the hole pose offset and in-hand pose simultaneously.
+    
+    Args:
+        contact_model: The contact manifold model
+        observations: Pose observations for estimation
+        config: Configuration dictionary with device settings
+        max_it: Maximum number of iterations
+        lr: Initial learning rate
+        optimizer_type: Type of optimizer ('adam' or 'sgd')
+        gradient_noise_std: Standard deviation for gradient noise
+        max_samples: Maximum number of samples to use
+        seed: Random seed for reproducibility
+        lr_decay_type: Type of learning rate decay ('none', 'exponential', 'step', 'cosine')
+        lr_decay_rate: Decay rate for exponential/step decay (typically 0.9-0.99)
+        lr_decay_step: Step size for step decay (number of iterations between decay)
+    """
 
     device = config['device']
+    
+    # Set seed for reproducibility if provided
+    if seed is not None:
+        set_seed(seed)
+        
     pose_h_p = torch.tensor(observations, dtype=torch.float32, device=device) if isinstance(observations, np.ndarray) else observations.to(device)
     initial_hole_pose = np.zeros((1,6), dtype=np.float32) # tf_H_h 
     pose_H_h = torch.nn.Parameter(torch.tensor(initial_hole_pose, dtype=torch.float32, device=device)) # tf_H_h 
@@ -97,9 +137,20 @@ def estimate_holePose_and_inHandPose(
     elif optimizer_type.lower() == 'sgd':
         optimizer = torch.optim.SGD(parameters, lr=lr)
 
+    # Set up learning rate scheduler
+    scheduler = None
+    if lr_decay_type.lower() == 'exponential':
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay_rate)
+    elif lr_decay_type.lower() == 'step':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_step, gamma=lr_decay_rate)
+    elif lr_decay_type.lower() == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_it)
+
     pose_H_h_history = [pose_H_h.detach().clone()]  # keep on device
     pose_P_p_history = [pose_H_h.detach().clone()]  # keep on device
     loss_history = []
+    lr_history = []  # Track learning rate over iterations
+    lr_history = []  # Track learning rate history
 
     use_combined_loss = False
 
@@ -115,11 +166,24 @@ def estimate_holePose_and_inHandPose(
                     p.grad += torch.randn_like(p.grad) * gradient_noise_std
 
         optimizer.step()
+        
+        # Apply learning rate decay
+        if scheduler is not None:
+            if lr_decay_type.lower() == 'step' and (iter + 1) % lr_decay_step == 0:
+                scheduler.step()
+            elif lr_decay_type.lower() in ['exponential', 'cosine']:
+                scheduler.step()
+        
         pose_P_p = torch.cat([pose_P_p_prefix, pose_P_p_y_optim, pose_P_p_z_optim, pose_P_p_suffix, pose_P_p_rx_optim], dim=-1)
 
         pose_H_h_history.append(pose_H_h.detach().clone())
         pose_P_p_history.append(pose_P_p.detach().clone())
         loss_history.append(loss.item())
+        lr_history.append(optimizer.param_groups[0]['lr'])  # Track current learning rate
+
+        # Record the current learning rate
+        for param_group in optimizer.param_groups:
+            lr_history.append(param_group['lr'])
 
         if loss.item() < 1e-6:
             print(f"Early stopping at iteration {iter}, loss: {loss.item():.6f}")
@@ -136,7 +200,7 @@ def estimate_holePose_and_inHandPose(
     pose_P_p_est = final_inhand_pose  # or any processing if needed
     tf_P_p_est = torch_pose_xyzabc_to_matrix(torch.tensor(final_inhand_pose, dtype=torch.float32)).cpu().numpy()  # Convert to matrix form
 
-    return tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history
+    return tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history, lr_history
 
 def estimate_holePose(
         contact_model, 
@@ -148,9 +212,13 @@ def estimate_holePose(
         gradient_noise_std=0.02, 
         max_samples=None, 
         save_results=False,
-        convergence_tolerance=1e-1,
+        convergence_tolerance=1e-2,
         convergence_window=25,
-        param_change_tolerance=2e-0
+        param_change_tolerance=2e-1,
+        seed=None,
+        lr_decay_type='none',
+        lr_decay_rate=0.95,
+        lr_decay_step=100
     ):
     """
     Estimate only the hole pose offset (tf_H_h) without optimizing the in-hand pose.
@@ -160,8 +228,17 @@ def estimate_holePose(
         convergence_tolerance: Threshold for loss change to consider convergence
         convergence_window: Number of iterations to check for convergence
         param_change_tolerance: Threshold for parameter change to consider convergence
+        seed: Random seed for reproducibility
+        lr_decay_type: Type of learning rate decay ('none', 'exponential', 'step', 'cosine')
+        lr_decay_rate: Decay rate for exponential/step decay (typically 0.9-0.99)
+        lr_decay_step: Step size for step decay (number of iterations between decay)
     """
     device = config['device']
+    
+    # Set seed for reproducibility if provided
+    if seed is not None:
+        set_seed(seed)
+        
     pose_h_p = torch.tensor(observations, dtype=torch.float32, device=device) if isinstance(observations, np.ndarray) else observations.to(device)
     
     # Initialize hole pose offset
@@ -188,8 +265,19 @@ def estimate_holePose(
     elif optimizer_type.lower() == 'sgd':
         optimizer = torch.optim.SGD(parameters, lr=lr)
 
+    # Set up learning rate scheduler
+    scheduler = None
+    if lr_decay_type.lower() == 'exponential':
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay_rate)
+    elif lr_decay_type.lower() == 'step':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_step, gamma=lr_decay_rate)
+    elif lr_decay_type.lower() == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_it)
+
     pose_H_h_history = [pose_H_h.detach().clone()]  # keep on device
     loss_history = []
+    lr_history = []  # Track learning rate over iterations
+    lr_history = []  # Track learning rate history
 
     use_combined_loss = False
     
@@ -212,8 +300,20 @@ def estimate_holePose(
 
         optimizer.step()
 
+        # Apply learning rate decay
+        if scheduler is not None:
+            if lr_decay_type.lower() == 'step' and (iter + 1) % lr_decay_step == 0:
+                scheduler.step()
+            elif lr_decay_type.lower() in ['exponential', 'cosine']:
+                scheduler.step()
+
         pose_H_h_history.append(pose_H_h.detach().clone())
         loss_history.append(loss.item())
+        lr_history.append(optimizer.param_groups[0]['lr'])  # Track current learning rate
+
+        # Record the current learning rate
+        for param_group in optimizer.param_groups:
+            lr_history.append(param_group['lr'])
 
         # Early stopping based on absolute loss threshold
         if loss.item() < 1e-6:
@@ -260,13 +360,27 @@ def estimate_holePose(
     pose_H_h_est = final_hole_pose  # or any processing if needed
     tf_H_h_est = torch_pose_xyzabc_to_matrix(torch.tensor(final_hole_pose, dtype=torch.float32)).cpu().numpy()  # Convert to matrix form
 
-    return tf_H_h_est, pose_H_h_est, pose_H_h_history, loss_history
+    return tf_H_h_est, pose_H_h_est, pose_H_h_history, loss_history, lr_history
 
 def read_observation(observation_path):
     tf_H_P = np.load(observation_path, allow_pickle=True)
     return tf_H_P 
 
-def offset_observation(max_hole_pose_offsets, max_in_hand_pose_offsets, observation, set_max_offsets=False):
+def offset_observation(max_hole_pose_offsets, max_in_hand_pose_offsets, observation, set_max_offsets=False, seed=None):
+    """
+    Generate offset observations for testing.
+    
+    Args:
+        max_hole_pose_offsets: Maximum offsets for hole pose
+        max_in_hand_pose_offsets: Maximum offsets for in-hand pose
+        observation: Original observation
+        set_max_offsets: Whether to use maximum offsets or random offsets
+        seed: Random seed for reproducibility
+    """
+    
+    # Set seed for reproducibility if provided
+    if seed is not None:
+        set_seed(seed)
 
     tf_H_h = np.eye(4) 
     if set_max_offsets:
@@ -369,21 +483,207 @@ def compute_errors(tf_H_h, pose_H_h_history, tf_H_h_est, tf_P_p, pose_P_p_histor
     
     return tf_H_h_error, pose_H_h_error, tf_H_h_history, tf_H_h_error_history, pose_H_h_error_history, tf_P_p_error, pose_P_p_error, tf_P_p_history, tf_P_p_error_history, pose_P_p_error_history, 
 
-def main(): 
+def plot_pose_estimates_2x3(pose_H_h_history, pose_P_p_history=None, title_prefix="Pose Estimates"):
+    """
+    Plot pose estimates vs iteration in a 2x3 subplot layout.
+    
+    Args:
+        pose_H_h_history: List of hole pose estimates over iterations (N, 6)
+        pose_P_p_history: Optional list of in-hand pose estimates over iterations (N, 6)
+        title_prefix: Prefix for the plot title
+    """
+    # Convert history to numpy array for easier indexing
+    if isinstance(pose_H_h_history[0], torch.Tensor):
+        pose_H_h_array = np.array([p.cpu().numpy().flatten() for p in pose_H_h_history])
+    else:
+        pose_H_h_array = np.array([p.flatten() for p in pose_H_h_history])
+    
+    iterations = np.arange(len(pose_H_h_array))
+    
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle(f'{title_prefix} vs Iteration', fontsize=16)
+    
+    # Pose component labels
+    pose_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
+    pose_units = ['[m]', '[m]', '[m]', '[rad]', '[rad]', '[rad]']
+    
+    # Plot hole pose estimates (6 components in 2x3 layout)
+    for i in range(6):
+        row = i // 3
+        col = i % 3
+        axs[row, col].plot(iterations, pose_H_h_array[:, i], 'b-', linewidth=2, label='Hole Pose')
+        axs[row, col].set_xlabel('Iteration')
+        axs[row, col].set_ylabel(f'{pose_labels[i]} {pose_units[i]}')
+        axs[row, col].set_title(f'Hole Pose {pose_labels[i]}')
+        axs[row, col].grid(True, alpha=0.3)
+        
+        # Add horizontal line at zero for reference
+        axs[row, col].axhline(0, color='gray', linestyle='--', alpha=0.5)
+        
+        # If in-hand pose history is provided, plot it as well
+        if pose_P_p_history is not None:
+            if isinstance(pose_P_p_history[0], torch.Tensor):
+                pose_P_p_array = np.array([p.cpu().numpy().flatten() for p in pose_P_p_history])
+            else:
+                pose_P_p_array = np.array([p.flatten() for p in pose_P_p_history])
+            
+            axs[row, col].plot(iterations, pose_P_p_array[:, i], 'r--', linewidth=2, label='In-Hand Pose')
+        
+        axs[row, col].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_pose_errors_2x3(pose_H_h_error_history, pose_P_p_error_history=None, title_prefix="Pose Errors"):
+    """
+    Plot pose errors vs iteration in a 2x3 subplot layout.
+    
+    Args:
+        pose_H_h_error_history: Array of hole pose errors over iterations (N, 6)
+        pose_P_p_error_history: Optional array of in-hand pose errors over iterations (N, 6)
+        title_prefix: Prefix for the plot title
+    """
+    pose_H_h_array = np.array(pose_H_h_error_history)
+    iterations = np.arange(len(pose_H_h_array))
+    
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle(f'{title_prefix} vs Iteration', fontsize=16)
+    
+    # Pose component labels
+    pose_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
+    pose_units = ['[m]', '[m]', '[m]', '[rad]', '[rad]', '[rad]']
+    
+    # Plot hole pose errors (6 components in 2x3 layout)
+    for i in range(6):
+        row = i // 3
+        col = i % 3
+        axs[row, col].plot(iterations, pose_H_h_array[:, i], 'b-', linewidth=2, label='Hole Pose Error')
+        axs[row, col].set_xlabel('Iteration')
+        axs[row, col].set_ylabel(f'{pose_labels[i]} Error {pose_units[i]}')
+        axs[row, col].set_title(f'Hole Pose {pose_labels[i]} Error')
+        axs[row, col].grid(True, alpha=0.3)
+        
+        # Add horizontal line at zero for reference
+        axs[row, col].axhline(0, color='gray', linestyle='--', alpha=0.5)
+        
+        # If in-hand pose error history is provided, plot it as well
+        if pose_P_p_error_history is not None:
+            pose_P_p_array = np.array(pose_P_p_error_history)
+            axs[row, col].plot(iterations, pose_P_p_array[:, i], 'r--', linewidth=2, label='In-Hand Pose Error')
+        
+        axs[row, col].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_pose_estimates_and_errors_combined(pose_history, pose_error_history, pose_P_p_history=None, pose_P_p_error_history=None, title_prefix="Pose Analysis"):
+    """
+    Plot both pose estimates and errors in a combined 4x3 subplot layout.
+    Top 2 rows show estimates, bottom 2 rows show errors.
+    
+    Args:
+        pose_history: List/array of pose estimates over iterations (N, 6)
+        pose_error_history: Array of pose errors over iterations (N, 6)
+        pose_P_p_history: Optional in-hand pose estimates (N, 6)
+        pose_P_p_error_history: Optional in-hand pose errors (N, 6)
+        title_prefix: Prefix for the plot title
+    """
+    # Convert history to numpy array for easier indexing
+    if isinstance(pose_history[0], torch.Tensor):
+        pose_array = np.array([p.cpu().numpy().flatten() for p in pose_history])
+    else:
+        pose_array = np.array([p.flatten() for p in pose_history])
+    
+    pose_error_array = np.array(pose_error_history)
+    iterations = np.arange(len(pose_array))
+    
+    fig, axs = plt.subplots(4, 3, figsize=(18, 16))
+    fig.suptitle(f'{title_prefix} - Estimates and Errors vs Iteration', fontsize=16)
+    
+    # Pose component labels
+    pose_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
+    pose_units = ['[m]', '[m]', '[m]', '[rad]', '[rad]', '[rad]']
+    
+    # Plot estimates and errors for each component
+    for i in range(6):
+        col = i % 3
+        
+        # Estimates (top 2 rows)
+        est_row = i // 3
+        axs[est_row, col].plot(iterations, pose_array[:, i], 'b-', linewidth=2, label='Hole Pose Estimate')
+        axs[est_row, col].set_xlabel('Iteration')
+        axs[est_row, col].set_ylabel(f'{pose_labels[i]} {pose_units[i]}')
+        axs[est_row, col].set_title(f'Hole Pose {pose_labels[i]} Estimate')
+        axs[est_row, col].grid(True, alpha=0.3)
+        axs[est_row, col].axhline(0, color='gray', linestyle='--', alpha=0.5)
+        
+        # Add in-hand pose estimates if provided
+        if pose_P_p_history is not None:
+            if isinstance(pose_P_p_history[0], torch.Tensor):
+                pose_P_p_array = np.array([p.cpu().numpy().flatten() for p in pose_P_p_history])
+            else:
+                pose_P_p_array = np.array([p.flatten() for p in pose_P_p_history])
+            axs[est_row, col].plot(iterations, pose_P_p_array[:, i], 'r--', linewidth=2, label='In-Hand Pose Estimate')
+        
+        axs[est_row, col].legend()
+        
+        # Errors (bottom 2 rows)
+        err_row = est_row + 2
+        axs[err_row, col].plot(iterations, pose_error_array[:, i], 'b-', linewidth=2, label='Hole Pose Error')
+        axs[err_row, col].set_xlabel('Iteration')
+        axs[err_row, col].set_ylabel(f'{pose_labels[i]} Error {pose_units[i]}')
+        axs[err_row, col].set_title(f'Hole Pose {pose_labels[i]} Error')
+        axs[err_row, col].grid(True, alpha=0.3)
+        axs[err_row, col].axhline(0, color='gray', linestyle='--', alpha=0.5)
+        
+        # Add in-hand pose errors if provided
+        if pose_P_p_error_history is not None:
+            pose_P_p_error_array = np.array(pose_P_p_error_history)
+            axs[err_row, col].plot(iterations, pose_P_p_error_array[:, i], 'r--', linewidth=2, label='In-Hand Pose Error')
+        
+        axs[err_row, col].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_learning_rate_history(lr_history, title_prefix="Learning Rate"):
+    """
+    Plot learning rate vs iteration.
+    
+    Args:
+        lr_history: List of learning rates over iterations
+        title_prefix: Prefix for the plot title
+    """
+    plt.figure(figsize=(10, 6))
+    plt.plot(lr_history, linewidth=2, marker='o', markersize=3)
+    plt.xlabel('Iteration')
+    plt.ylabel('Learning Rate')
+    plt.title(f'{title_prefix} vs Iteration')
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+    plt.tight_layout()
+    plt.show()
+
+def main(seed=42): 
+    # Set global seed for reproducibility
+    set_seed(seed)
+    print(f"Running main() with seed={seed} for reproducible testing")
+    
     # example usage 
     config = {
-        'contact_model_path': '/home/rp/abhay_ws/cicp/checkpoints/gear_best_NN_model_xyzabc (copy).pth', 
-        'observation_path': '/home/rp/abhay_ws/cicp/data/gear_observations/GEAR_TIMED_ICP_10_B3/hole_frame/gear_pose_H_P_0.npy',
+        'contact_model_path': '/home/rp/abhay_ws/cicp/checkpoints/extrusion_run_4_best_NN_model_xyzabc.pth', 
+        'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_1.npy',
         'device': 'cuda' if torch.cuda.is_available() else 'cpu', 
     }
 
     tf_H_P = read_observation(config['observation_path'])  
     tf_h_p, tf_H_h, tf_P_p = offset_observation(
-        max_hole_pose_offsets=np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0]), 
+        max_hole_pose_offsets=np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0]), 
         # max_in_hand_pose_offsets=np.array([0, 10.0, 10.0, 0, 0, 10.0]),
         max_in_hand_pose_offsets=np.array([0, 0, 0, 0, 0, 0]),
         observation=tf_H_P, 
-        set_max_offsets=True
+        set_max_offsets=True,
+        seed=seed  # Pass seed for reproducible offset generation
     )  # Offset the observation
     pose_H_h = torch_matrix_to_pose_xyzabc(torch.tensor(tf_H_h.reshape(1,4,4), dtype=torch.float32)).cpu().numpy()      
     pose_P_p = torch_matrix_to_pose_xyzabc(torch.tensor(tf_P_p.reshape(1,4,4), dtype=torch.float32)).cpu().numpy()  
@@ -395,6 +695,10 @@ def main():
     cpm = ContactPoseManifold(geometry="gear") 
     cpm.load_model_from_path(config['contact_model_path'])
 
+    # print("\n" + "="*50)
+    # print("Testing estimate_holePose_and_inHandPose() - joint estimation")
+    # print("="*50)
+    
     # ret = estimate_holePose_and_inHandPose(
     #     contact_model=cpm,  
     #     observations=pose_h_p,
@@ -402,16 +706,31 @@ def main():
     #     max_samples=10000,
     #     max_it=1000, 
     #     lr=1e-2, 
-    #     optimizer_type='adam', 
+    #     optimizer_type='adam',
+    #     seed=seed,  # Pass seed for reproducible estimation
+    #     lr_decay_type='step',  # Enable step learning rate decay
+    #     lr_decay_rate=0.9,  # Reduce LR by 10% at each decay step
+    #     lr_decay_step=200  # Decay every 200 iterations
     # ) 
-    # tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history = ret 
+    # tf_H_h_est, pose_H_h_est, pose_H_h_history, tf_P_p_est, pose_P_p_est, pose_P_p_history, loss_history, lr_history = ret 
     # tf_H_h_error, pose_H_h_error, tf_H_h_history, tf_H_h_error_history, pose_H_h_error_history, tf_P_p_error, pose_P_p_error, tf_P_p_history, tf_P_p_error_history, pose_P_p_error_history = compute_errors(tf_H_h, pose_H_h_history, tf_H_h_est, tf_P_p, pose_P_p_history, tf_P_p_est) 
-    # print(f"Initial hole pose error: {pose_H_h}")
-    # print(f"Final hole pose est: {pose_H_h_est}")
-    # print(f"Final pose error: {pose_H_h_error}") 
-    # print(f"Initial in-hand pose error: {pose_P_p}")
-    # print(f"Final in-hand pose est: {pose_P_p_est}")
-    # print(f"Final in-hand pose error: {pose_P_p_error}")
+    # print(f"Joint estimation - Initial hole pose error: {pose_H_h}")
+    # print(f"Joint estimation - Final hole pose est: {pose_H_h_est}")
+    # print(f"Joint estimation - Final pose error: {pose_H_h_error}") 
+    # print(f"Joint estimation - Initial in-hand pose error: {pose_P_p}")
+    # print(f"Joint estimation - Final in-hand pose est: {pose_P_p_est}")
+    # print(f"Joint estimation - Final in-hand pose error: {pose_P_p_error}")
+    
+    # # Plot joint estimation results
+    # plot_pose_estimates_2x3(pose_H_h_history, pose_P_p_history, title_prefix="Joint Pose Estimates (Hole + In-Hand)")
+    # plot_pose_errors_2x3(pose_H_h_error_history, pose_P_p_error_history, title_prefix="Joint Pose Errors (Hole + In-Hand)")
+    
+    # # Plot combined estimates and errors in 4x3 subplots
+    # plot_pose_estimates_and_errors_combined(pose_H_h_history, pose_H_h_error_history, pose_P_p_history, pose_P_p_error_history, title_prefix="Joint Estimation (Hole + In-Hand)")
+    
+    # # Plot learning rate history
+    # plot_learning_rate_history(lr_history, title_prefix="Joint Estimation Learning Rate")
+    
     # plot_history(pose_H_h_error_history, pose_P_p_error_history, loss_history) 
 
     print("\n" + "="*50)
@@ -419,44 +738,75 @@ def main():
     print("="*50)
     
     # Test the new estimate_holePose function (only hole pose estimation)
+    time_start = time.time()
     ret_hole_only = estimate_holePose(
         contact_model=cpm,  
         observations=pose_h_p,
         config=config,
         max_samples=None,
-        max_it=1000, 
-        lr=1e-1, 
-        optimizer_type='adam', 
+        max_it=10_000, 
+        lr=4e-1, 
+        optimizer_type='adam',
+        convergence_tolerance=1e-2,
+        convergence_window=10,
+        param_change_tolerance=1e-3,
+        seed=seed,  # Pass seed for reproducible estimation
+        lr_decay_type='exponential',  # Enable exponential learning rate decay
+        lr_decay_rate=0.98,  # Decay rate (reduce LR by 2% each step)
+        lr_decay_step=10_000  # Decay every 10 iterations (only used for 'step' decay)
     ) 
-    tf_H_h_est_hole_only, pose_H_h_est_hole_only, pose_H_h_history_hole_only, loss_history_hole_only = ret_hole_only
+    tf_H_h_est_hole_only, pose_H_h_est_hole_only, pose_H_h_history_hole_only, loss_history_hole_only, lr_history_hole_only = ret_hole_only
+    time_end = time.time()
+    print(f"Hole-only estimation took {time_end - time_start:.2f} seconds")
     
     # Compute errors for hole-only estimation
     tf_H_h_error_hole_only = tf_H_h @ np.linalg.inv(tf_H_h_est_hole_only)  
     pose_H_h_error_hole_only = torch_matrix_to_pose_xyzabc(torch.tensor(tf_H_h_error_hole_only, dtype=torch.float32)).cpu().numpy()
     
+    # Compute error history for hole-only estimation
+    tf_H_h_history_hole_only = []
+    tf_H_h_error_history_hole_only = []
+    pose_H_h_error_history_hole_only = []
+    for pose in pose_H_h_history_hole_only:
+        tf_H_h_history_hole_only.append(torch_pose_xyzabc_to_matrix(torch.tensor(pose.reshape(1,6), dtype=torch.float32)).cpu().numpy()) 
+        tf_H_h_error_history_hole_only.append(tf_H_h @ np.linalg.inv(tf_H_h_history_hole_only[-1]))
+        pose_H_h_error_history_hole_only.append(torch_matrix_to_pose_xyzabc(torch.tensor(tf_H_h_error_history_hole_only[-1], dtype=torch.float32)).cpu().numpy())
+    tf_H_h_history_hole_only = np.array(tf_H_h_history_hole_only).reshape(-1, 4, 4)
+    tf_H_h_error_history_hole_only = np.array(tf_H_h_error_history_hole_only).reshape(-1, 4, 4)
+    pose_H_h_error_history_hole_only = np.array(pose_H_h_error_history_hole_only).reshape(-1, 6)
+    
     print(f"Hole-only estimation - Initial hole pose error: {pose_H_h}")
     print(f"Hole-only estimation - Final hole pose est: {pose_H_h_est_hole_only}")
     print(f"Hole-only estimation - Final hole pose error: {pose_H_h_error_hole_only}")
     
-    # # Plot loss history comparison
-    # plt.figure(figsize=(12, 5))
-    # plt.subplot(1, 2, 1)
-    # plt.plot(loss_history, label='Joint estimation (hole + in-hand)')
-    # plt.xlabel('Iteration')
-    # plt.ylabel('Loss')
-    # plt.title('Joint Estimation Loss History')
-    # plt.legend()
-    # plt.grid()
+    # # Plot pose estimates vs iteration in 2x3 subplots
+    # plot_pose_estimates_2x3(pose_H_h_history_hole_only, title_prefix="Hole Pose Estimates (Hole-Only)")
     
-    plt.subplot(1, 2, 2)
-    plt.plot(loss_history_hole_only, label='Hole-only estimation')
+    # # Plot learning rate history
+    # plot_learning_rate_history(lr_history_hole_only, title_prefix="Hole-Only Estimation Learning Rate")
+    
+    # Plot loss history
+    plt.figure(figsize=(8, 6))
+    plt.plot(loss_history_hole_only, label='Hole-only estimation', linewidth=2)
     plt.xlabel('Iteration')
     plt.ylabel('Loss')
     plt.title('Hole-only Estimation Loss History')
     plt.legend()
-    plt.grid()
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
+    # Plot pose errors vs iteration in 2x3 subplots
+    plot_pose_errors_2x3(pose_H_h_error_history_hole_only, title_prefix="Hole Pose Errors (Hole-Only)")
+
+    # # Combined plots for estimates and errors
+    # plot_pose_estimates_and_errors_combined(pose_H_h_history_hole_only, pose_H_h_error_history_hole_only, title_prefix="Combined Pose Analysis (Hole-Only)")
+    
 if __name__ == "__main__":
-    main()
+    # Default seed for reproducible testing
+    import sys
+    
+    # Normal operation with specified seed
+    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 42
+    print(f"Using seed: {seed}")
+    main(seed=seed)

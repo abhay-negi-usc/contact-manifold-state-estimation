@@ -43,14 +43,14 @@ class TrainConfig:
         "wx": "rad", "wy": "rad", "wz": "rad"
     }
     layer_sizes: tuple = (6, 2048, 2048, 2048, 2048, 6)
-    lr: float = 1e-5
+    lr: float = 1e-6
     epochs: int = 10_000_000
     batch_size: int = 2**18
     num_workers: int = 0
     pin_memory: bool = True
 
     # use full dataset by default
-    sample_frac: float = 0.25
+    sample_frac: float = 1.0 
 
     # perturbation ranges: x,y,z in data units (e.g., mm); w* given in degrees
     transform_ranges = {"x": 5.0, "y": 5.0, "z": 5.0, "wx_deg": 5.0, "wy_deg": 5.0, "wz_deg": 5.0}
