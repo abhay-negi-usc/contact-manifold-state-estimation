@@ -25,3 +25,4 @@ model_training/checkpoints/*.pth
 state_estimation/__pycache__
 state_estimation/compare_models_out 
 state_estimation/__pycache__/*
+real_data/visualization

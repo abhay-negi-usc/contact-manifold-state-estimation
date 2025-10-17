@@ -34,16 +34,18 @@ def chunked_nn_argmin(inputs: np.ndarray, corpus: np.ndarray, chunk: int = 16384
 
 @dataclass
 class TrainConfig:
-    resume: bool = True
-    resume_path: str = "./model_training/checkpoints/best_model_wxyz.pth"
+    geometry: str = "BNC"
 
-    data_path: str = "./data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
+    resume: bool = False     
+    resume_path: str = f"./model_training/checkpoints/{geometry}_best_model_wxyz.pth"
+
+    data_path: str = "./real_data/BNC_real_MAP_1.csv"
     data_units = {
-        "x": "m", "y": "m", "z": "m",
+        "x": "mm", "y": "mm", "z": "mm",
         "wx": "rad", "wy": "rad", "wz": "rad"
     }
-    layer_sizes: tuple = (6, 2048, 2048, 2048, 2048, 6)
-    lr: float = 1e-6
+    layer_sizes: tuple = (6, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 6)
+    lr: float = 1e-3
     epochs: int = 10_000_000
     batch_size: int = 2**18
     num_workers: int = 0
@@ -67,13 +69,13 @@ class TrainConfig:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint_dir: str = "./model_training/checkpoints"
-    save_name: str = "best_model_wxyz.pth"
+    save_name: str = f"{geometry}_best_model_wxyz.pth"
 
     # evaluation
     eval_every: int = 1
     eval_subset_frac: float = 0.25
     eval_batch_size: int = 8192
-    metrics_csv: str = "./model_training/metrics_wxyz.csv"
+    metrics_csv: str = f"./model_training/{geometry}_metrics_wxyz.csv"
 
     # wandb configuration
     wandb_project: str = "contact-manifold-learning"
@@ -95,7 +97,7 @@ class NNIndex:
             try:
                 from scipy.spatial import cKDTree
                 # leafsize=64 is a good default; tweak if memory/time is tight
-                self.index = cKDTree(self.data, leafsize=64, balanced_tree=True, compact_nodes=True)
+                self.index = cKDTree(self.data, leafsize=1, balanced_tree=True, compact_nodes=True)
                 self.query = self._query_ckdtree
             except Exception:
                 print("[NNIndex] cKDTree not available; falling back to chunked NumPy.")
