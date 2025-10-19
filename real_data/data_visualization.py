@@ -9,11 +9,11 @@ import matplotlib.animation as animation
 import os
 
 
-geometry = "gear"
+geometry = "bnc_path"
  
 # map_path = "/media/rp/Elements/abhay_ws/mujoco_contact_graph_generation/results/cross_rounded_data/perturb_v3/processed_data/cross_rounded_peg_contact_map_sim_with_normals_neighbors_10.csv"
-map_path = "/media/rp/Elements1/abhay_ws/real_contact_data/MAP1_GEAR_JAN16_PEG_filtered.csv"
-# map_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1.csv"
+# map_path = "/media/rp/Elements1/abhay_ws/real_contact_data/MAP1_GEAR_JAN16_PEG_filtered.csv"
+map_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1_smoothed_path.csv"
 map_df = pd.read_csv(map_path)
 map_df.rename(columns={'FK_X':'x','FK_Y':'y','FK_Z':'z','FK_A':'a','FK_B':'b','FK_C':'c'}, inplace=True) 
 map_df.columns = map_df.columns.str.lower()
@@ -21,14 +21,14 @@ map_df = map_df[map_df['z'] < 24.5] # REMOVE ME
 map_data = map_df[["x", "y", "z", "a", "b", "c"]].values
 
 # transform map data 
-delta = np.array([0,0,0,0,0,0]) 
+delta = np.array([5,0,0,0,0,0]) 
 transformed_map_data = CU.batch_apply_delta_poses(map_data, np.repeat(delta.reshape(1,6), map_data.shape[0], axis=0))
 
 # cpm = ContactPoseMap(pose_data=transformed_map_data, numpy_seed=np.random.randint(1_000_000_000), flag_batch=True)
 # cpm.downsample_map(10_000)
 
 # Create output directory if it doesn't exist
-os.makedirs('./real_data', exist_ok=True)
+os.makedirs('./real_data/visualization', exist_ok=True)
 
 # Extract x, y, z coordinates and rotation data
 points_3d = transformed_map_data[:, :3]  # First 3 columns are x, y, z
@@ -73,7 +73,7 @@ def create_rotating_gif(points, colors, color_label, filename):
     # Save as GIF
     print(f"Saving {filename}...")
     try:
-        anim.save(f'./real_data/{filename}', writer='pillow', fps=12)
+        anim.save(f'./real_data/visualization/{filename}', writer='pillow', fps=12)
         print(f"Animation saved as './real_data/{filename}'")
     except Exception as e:
         print(f"Failed to save {filename}: {e}")
