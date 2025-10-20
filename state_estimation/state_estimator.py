@@ -212,9 +212,9 @@ def estimate_holePose(
         gradient_noise_std=0.02, 
         max_samples=None, 
         save_results=False,
-        convergence_tolerance=1e-2,
+        convergence_tolerance=1e-4,
         convergence_window=25,
-        param_change_tolerance=2e-1,
+        param_change_tolerance=1e-3,
         seed=None,
         lr_decay_type='none',
         lr_decay_rate=0.95,
@@ -550,8 +550,8 @@ def plot_pose_errors_2x3(pose_H_h_error_history, pose_P_p_error_history=None, ti
     fig.suptitle(f'{title_prefix} vs Iteration', fontsize=16)
     
     # Pose component labels
-    pose_labels = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
-    pose_units = ['[m]', '[m]', '[m]', '[rad]', '[rad]', '[rad]']
+    pose_labels = ['X', 'Y', 'Z', 'RZ', 'RY', 'RX']
+    pose_units = ['[m]', '[m]', '[m]', '[deg]', '[deg]', '[deg]']
     
     # Plot hole pose errors (6 components in 2x3 layout)
     for i in range(6):
@@ -671,14 +671,23 @@ def main(seed=1):
     
     # example usage 
     config = {
-        'contact_model_path': '/home/rp/abhay_ws/cicp/checkpoints/extrusion_run_4_best_NN_model_xyzabc.pth', 
+        # 'contact_model_path': '/home/rp/abhay_ws/cicp/checkpoints/extrusion_run_4_best_NN_model_xyzabc.pth', 
         # 'contact_model_path': '/home/rp/abhay_ws/contact-manifold-state-estimation/model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth', 
-        'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_0.npy',
+        'contact_model_path': "./model_training/checkpoints/BNC_run_1_best_NN_model_xyzabc.pth", 
+        # 'observation_path': '/home/rp/abhay_ws/cicp/data/extrusion_observations/extrusion_timed_icp_10/hole_frame/extrusion_pose_H_P_0.npy',
+        'observation_path': '/home/rp/dhanush_ws/sunrise-wrapper/data/BNC/noisy_trajectories/Oct18_2118/exec_1_traj_H_P.npy',
         'device': 'cuda' if torch.cuda.is_available() else 'cpu', 
-        'sim_data': True 
+        'sim_data': False, 
     }
 
     tf_H_P = read_observation(config['observation_path'])  
+
+    # sample 
+    tf_H_P = tf_H_P[20000:22000]  
+    tf_H_P = tf_H_P[::10]  # downsample for faster testing
+
+    plot_pose_errors_2x3(tf_H_P, title_prefix="Observation Trajectory")
+
 
     if config['sim_data']:
         # updating frame of observations from base of peg to tip of peg 
@@ -759,17 +768,17 @@ def main(seed=1):
         observations=pose_h_p,
         config=config,
         max_samples=None,
-        max_it=1000, 
-        lr=1e-1, 
+        max_it=10000, 
+        lr=1e-3, 
         optimizer_type='adam',
         # convergence_tolerance=1e-2,
         # convergence_window=10,
         # param_change_tolerance=1e-3,
         seed=seed,  # Pass seed for reproducible estimation
         lr_decay_type='exponential',  # Enable exponential learning rate decay
-        lr_decay_rate=0.98,  # Decay rate (reduce LR by 2% each step)
-        lr_decay_step=100  # Decay every 10 iterations (only used for 'step' decay)
-    ) 
+        lr_decay_rate=1.0,  # Decay rate (reduce LR by 2% each step)
+        lr_decay_step=100000  # Decay every 10 iterations (only used for 'step' decay)
+    )     
     tf_H_h_est_hole_only, pose_H_h_est_hole_only, pose_H_h_history_hole_only, loss_history_hole_only, lr_history_hole_only = ret_hole_only
     time_end = time.time()
     print(f"Hole-only estimation took {time_end - time_start:.2f} seconds")

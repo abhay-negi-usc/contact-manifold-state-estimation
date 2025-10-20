@@ -127,25 +127,27 @@ class OptimizedPoseRegressor(nn.Module):
 # === Training Loop ===
 def main():
     # geometry = "extrusion"
-    geometry = "gear"
+    geometry = "BNC"
     run = 1
     # data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
-    data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/gear_sim_data.csv"
+    # data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/gear_sim_data.csv"
+    data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1.csv"
     layer_sizes = [6, 4096, 4096, 4096, 4096, 6]
     transform_ranges = {"x": 10, "y": 10, "z": 10, "a": 10, "b": 10, "c": 10}
     # resume_checkpoint = "./model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth"
-    resume_checkpoint = "./model_training/checkpoints/gear_run_1_best_NN_model_xyzabc.pth"
+    # resume_checkpoint = "./model_training/checkpoints/gear_run_1_best_NN_model_xyzabc.pth"
+    resume_checkpoint = "./model_training/checkpoints/BNC_run_1_best_NN_model_xyzabc.pth" 
 
     wandb.init(
         project='contact-manifold-learning',
         entity='abhay-negi-usc-university-of-southern-california',
         config={
-            "learning_rate": 1e-3,
+            "learning_rate": 1e-7,
             "epochs": 1_000_000_000,
             "batch_size": 2**22,  # 4096 - optimal from benchmark
             "layer_sizes": layer_sizes,
             "transform_ranges": transform_ranges,
-            "resume_checkpoint": resume_checkpoint,
+            # "resume_checkpoint": resume_checkpoint,
             "consistency_weight": 100.0,
             "flag_force_save": False,
             "samples_per_epoch": 50000,  # Reduced for faster epochs
@@ -157,19 +159,22 @@ def main():
     config = wandb.config
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
+
     # Enable mixed precision training (use new API)
     scaler = torch.amp.GradScaler('cuda') if DEVICE == "cuda" else None
 
+    # FIXME: HYPERPARAMETERS AND CONFIG 
+
     # Load and preprocess data
     df = pd.read_csv(data_path)
-    df = df.drop(index=0).reset_index(drop=True) # remove units row 
+    # df = df.drop(index=0).reset_index(drop=True) # remove units row 
     # only keep rows where contact == 1
-    df = df[df['contact'] == 1].reset_index(drop=True)
+    # df = df[df['contact'] == 1].reset_index(drop=True)
     df = df.sample(frac=1.0)
 
     # convert x,y,z from meters to mm 
     # df[['x','y','z']] = df[['x','y','z']].astype(np.float32) * 1000.0
-    print("Converted x,y,z from meters to mm\n")
+    # print("Converted x,y,z from meters to mm\n")
 
     original_poses = torch.tensor(df[['x','y','z','a','b','c']].values.astype(np.float32))
     print(f"Loaded {len(original_poses)} poses from {data_path}")
