@@ -126,25 +126,27 @@ class OptimizedPoseRegressor(nn.Module):
 
 # === Training Loop ===
 def main():
-    # geometry = "extrusion"
-    geometry = "BNC"
+    geometry = "extrusion_mujoco"
+    # geometry = "gear"
     run = 1
     # data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
     # data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/gear_sim_data.csv"
-    data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1.csv"
+    data_path = "/media/rp/Elements1/abhay_ws/sim_contact_maps/extrusion_peg_contact_map_sim.csv"
+    # data_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1.csv"
     layer_sizes = [6, 4096, 4096, 4096, 4096, 6]
     transform_ranges = {"x": 10, "y": 10, "z": 10, "a": 10, "b": 10, "c": 10}
     # resume_checkpoint = "./model_training/checkpoints/extrusion_run_2_best_NN_model_xyzabc.pth"
     # resume_checkpoint = "./model_training/checkpoints/gear_run_1_best_NN_model_xyzabc.pth"
-    resume_checkpoint = "./model_training/checkpoints/BNC_run_1_best_NN_model_xyzabc.pth" 
+    # resume_checkpoint = "./model_training/checkpoints/BNC_run_1_best_NN_model_xyzabc.pth" 
+    resume_checkpoint = "./model_training/checkpoints/extrusion_mujoco_run_1_best_NN_model_xyzabc.pth"    
 
     wandb.init(
         project='contact-manifold-learning',
         entity='abhay-negi-usc-university-of-southern-california',
         config={
-            "learning_rate": 1e-7,
+            "learning_rate": 1e-4,
             "epochs": 1_000_000_000,
-            "batch_size": 2**22,  # 4096 - optimal from benchmark
+            "batch_size": 2**12,  # 4096 - optimal from benchmark
             "layer_sizes": layer_sizes,
             "transform_ranges": transform_ranges,
             # "resume_checkpoint": resume_checkpoint,

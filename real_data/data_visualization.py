@@ -8,24 +8,51 @@ from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.animation as animation
 import os
 
-
-geometry = "bnc_path"
+geometry = "extrusion_trimesh"
  
 # map_path = "/media/rp/Elements/abhay_ws/mujoco_contact_graph_generation/results/cross_rounded_data/perturb_v3/processed_data/cross_rounded_peg_contact_map_sim_with_normals_neighbors_10.csv"
 # map_path = "/media/rp/Elements1/abhay_ws/real_contact_data/MAP1_GEAR_JAN16_PEG_filtered.csv"
-map_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1_smoothed_path.csv"
+# map_path = "/home/rp/abhay_ws/contact-manifold-state-estimation/real_data/BNC_real_MAP_1_smoothed_path.csv"
+# map_path = "./data_generation/gear_sim_data.csv"
+map_path = "./data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
+# map_path = "/media/rp/Elements1/abhay_ws/mujoco_contact_graph_generation/data/extrusion_real_map.csv"
+# map_path = "/media/rp/Elements1/abhay_ws/sim_contact_maps/extrusion_peg_contact_map_sim.csv"
 map_df = pd.read_csv(map_path)
 map_df.rename(columns={'FK_X':'x','FK_Y':'y','FK_Z':'z','FK_A':'a','FK_B':'b','FK_C':'c'}, inplace=True) 
 map_df.columns = map_df.columns.str.lower()
-map_df = map_df[map_df['z'] < 24.5] # REMOVE ME 
+# map_df = map_df[map_df['z'] < 24.0] # REMOVE ME 
+# convert meters to mm 
+map_df[['x', 'y', 'z']] = map_df[['x', 'y', 'z']] * 1000.0
+import pdb; pdb.set_trace()
+
+# randomly sample data 
+N_samples = 10_000
+if map_df.shape[0] > N_samples:
+    map_df = map_df.sample(n=N_samples, random_state=42).reset_index(drop=True)
+
+# fix contact distance 
+# if all values of contact_distance are NaN's, remove the column 
+if 'contact_distance' in map_df.columns:
+    if map_df['contact_distance'].isna().all():
+        map_df.drop(columns=['contact_distance'], inplace=True)
+# rename metric to contact_distance
+if 'metric' in map_df.columns:
+    map_df.rename(columns={'metric':'contact_distance'}, inplace=True)
+# if there is no negative contact distance, negate values where contact==1 
+if map_df['contact_distance'].min() >= 0.0:
+    map_df.loc[map_df['contact'] == 1, 'contact_distance'] *= -1.0
+
+# filter contact_distance (for trimesh data)
+min_contact_distance = -1.0 # penetration depth  
+max_contact_distance = 1.0 # gap distance
+# map_df = map_df[(map_df['contact_distance'] >= min_contact_distance) & (map_df['contact_distance'] <= max_contact_distance)]
+
 map_data = map_df[["x", "y", "z", "a", "b", "c"]].values
 
-# transform map data 
-delta = np.array([5,0,0,0,0,0]) 
-transformed_map_data = CU.batch_apply_delta_poses(map_data, np.repeat(delta.reshape(1,6), map_data.shape[0], axis=0))
-
-# cpm = ContactPoseMap(pose_data=transformed_map_data, numpy_seed=np.random.randint(1_000_000_000), flag_batch=True)
-# cpm.downsample_map(10_000)
+# # transform map data 
+# delta = np.array([0,0,0,0,0,0]) 
+# transformed_map_data = CU.batch_apply_delta_poses(map_data, np.repeat(delta.reshape(1,6), map_data.shape[0], axis=0))
+transformed_map_data = map_data
 
 # Create output directory if it doesn't exist
 os.makedirs('./real_data/visualization', exist_ok=True)

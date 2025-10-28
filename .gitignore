@@ -17,6 +17,7 @@ __pycache__
 *.npz
 data_generation/*.csv
 data_generation/*.npz
+data_generation/data
 wandb 
 model_training/checkpoints/*.pth
 *.png 

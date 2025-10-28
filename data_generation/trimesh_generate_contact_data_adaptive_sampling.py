@@ -31,7 +31,7 @@ import random
 import time
 
 # ====================== CONFIG ======================
-geometry = "gear"
+geometry = "extrusion"
 config = {
     # Geometry identifier for output filename
     "geometry": geometry,
@@ -47,9 +47,9 @@ config = {
     "sampling": {
         # Units: meters for xyz, radians for abc unless 'degrees'=True
         "xyz": {
-            "x": {"min": -0.005, "max": 0.005, "step": 0.0005},
-            "y": {"min": -0.005, "max": 0.005, "step": 0.0005},
-            "z": {"min": 0.0, "max": 0.025, "step": 0.0025},  # z is the primary axis
+            "x": {"min": -0.00075, "max": 0.00075, "step": 0.00025},
+            "y": {"min": -0.00075, "max": 0.00075, "step": 0.00025},
+            "z": {"min": 0.0, "max": 0.025, "step": 0.0020},  # z is the primary axis
         },
         "abc": {
             # These are degrees by default (set degrees=False to use radians)
@@ -62,7 +62,7 @@ config = {
         "inclusive": True,  # include the max endpoint if it lands on the grid
         "adaptive": True,    # enable adaptive per-slice sampling
         "search_margin": 0.1,  # safety margin when searching for contact bounds
-        "max_penetration_depth": 0.0005,  # maximum allowed penetration depth in meters
+        "max_penetration_depth": 0.001,  # maximum allowed penetration depth in meters
     },
 
     # Parallel execution (can be used for both traditional and adaptive sampling)
@@ -610,7 +610,7 @@ def _find_bound_in_direction(args):
     
     bound = None
     for val in search_vals:
-        is_contact, penetration = evaluate_pose_at_val(val)
+        is_contact, penetration = evaluate_pose_at
         if is_contact:
             if penetration <= max_penetration:
                 bound = val  # Keep updating as long as penetration is acceptable

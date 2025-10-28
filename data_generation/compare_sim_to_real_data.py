@@ -10,8 +10,11 @@ from utils.pose_utils import torch_pose_xyzabc_to_matrix, torch_matrix_to_pose_x
 #--- CONFIG ---# 
 # filepath_sim_data = "/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/cross_data/cross_data_merged/processed_data/cross_contact_poses_mujoco.csv"
 # filepath_real_data = "/home/rp/dhanush_ws/sunrise-wrapper/contact_maps/cross_round_tight/CASE_cross_round_tight_aut_map_4.pkl" 
-filepath_sim_data = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
+# filepath_sim_data = "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/extrusion_sim_data_with_logmaps_no_units_row.csv"
+# filepath_real_data = "/home/rp/dhanush_ws/sunrise-wrapper/contact_maps/extrusion_rounded/zfilt_extrusion_rounded_aut_map_1.pkl" 
+filepath_sim_data = "/media/rp/Elements1/abhay_ws/sim_contact_maps/extrusion_peg_contact_map_sim.csv"
 filepath_real_data = "/home/rp/dhanush_ws/sunrise-wrapper/contact_maps/extrusion_rounded/zfilt_extrusion_rounded_aut_map_1.pkl" 
+description = "extrusion_mujoco_vs_real"
 
 #--- LOAD DATA ---# 
 df_sim = pd.read_csv(filepath_sim_data) 
@@ -188,10 +191,10 @@ def plot_6d_pose_errors(pose_errors_6d, title_suffix, filename_suffix):
     return labels, units
 
 # Plot for Case 1: Real to Sim
-labels, units = plot_6d_pose_errors(pose_errors_6d_real_to_sim, "Real to Sim Nearest Neighbors", "real_to_sim")
+labels, units = plot_6d_pose_errors(pose_errors_6d_real_to_sim, "Real to Sim Nearest Neighbors", f"{description}_real_to_sim")
 
 # Plot for Case 2: Sim to Real  
-plot_6d_pose_errors(pose_errors_6d_sim_to_real, "Sim to Real Nearest Neighbors", "sim_to_real")
+plot_6d_pose_errors(pose_errors_6d_sim_to_real, "Sim to Real Nearest Neighbors", f"{description}_sim_to_real")
 
 def print_detailed_statistics(pose_errors_6d, labels, units, case_name):
     """Print detailed statistics for each component."""
