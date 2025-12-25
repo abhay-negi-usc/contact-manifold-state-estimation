@@ -31,14 +31,16 @@ import random
 import time
 
 # ====================== CONFIG ======================
-geometry = "extrusion"
+geometry = "gear_trimesh"
 config = {
     # Geometry identifier for output filename
     "geometry": geometry,
     
     # Fixed paths
-    "mesh1": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_hole.obj",
-    "mesh2": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_peg.obj",
+    # "mesh1": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_hole.obj",
+    # "mesh2": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/{geometry}_peg.obj",
+    "mesh1": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_hole.obj",
+    "mesh2": f"/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/gear_peg.obj",
 
     # Pose of mesh1 (static)
     "mesh1_T": np.eye(4).tolist(),   # 4x4 row-major
@@ -47,8 +49,8 @@ config = {
     "sampling": {
         # Units: meters for xyz, radians for abc unless 'degrees'=True
         "xyz": {
-            "x": {"min": -0.00075, "max": 0.00075, "step": 0.00025},
-            "y": {"min": -0.00075, "max": 0.00075, "step": 0.00025},
+            "x": {"min": -0.001, "max": 0.001, "step": 0.00025},
+            "y": {"min": -0.001, "max": 0.001, "step": 0.00025},
             "z": {"min": 0.0, "max": 0.025, "step": 0.0020},  # z is the primary axis
         },
         "abc": {
@@ -86,8 +88,8 @@ config = {
 
     # Output
     "save": {
-        "csv_path": "./data_generation/{geometry}_pose_sweep_contacts_adaptive_with_logmaps.csv",
-        "checkpoint_path": "./data_generation/{geometry}_checkpoint.pkl",
+        "csv_path": "/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/gear_trimesh/{geometry}_pose_sweep_contacts_adaptive_with_logmaps.csv",
+        "checkpoint_path": "/media/rp/Elements1/abhay_ws/contact-manifold-state-generation/data/gear_trimesh/{geometry}_checkpoint.pkl",
         "max_contacts_to_print": 0,  # prints none; raise for debug
         "save_interval": 10_000,  # save checkpoint every N poses
         "randomize_poses": True,  # randomize pose order for better interruption handling
