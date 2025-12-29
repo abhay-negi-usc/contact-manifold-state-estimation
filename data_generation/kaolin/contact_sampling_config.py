@@ -10,7 +10,7 @@ CONFIG = {
         # Total number of pose samples (rows) to be written to CSV/NPZ.
         # This is the *global budget* for the adaptive sampler.
         # Coarse + fine samples both count toward this if enabled.
-        "budget_rows": 1_000_000,
+        "budget_rows": 10_000_000,
 
         # Number of poses evaluated in parallel on the GPU per kernel call.
         # Larger = better GPU utilization but higher VRAM usage.
