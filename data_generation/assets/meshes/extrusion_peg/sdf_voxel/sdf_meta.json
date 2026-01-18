@@ -1,0 +1,53 @@
+{
+  "obj_path": "/home/omey/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_peg/extrusion_peg.obj",
+  "resolution": 256,
+  "min_xyz": [
+    -0.054999999701976776,
+    -0.054999999701976776,
+    -0.019999999552965164
+  ],
+  "max_xyz": [
+    0.054999999701976776,
+    0.054999999701976776,
+    0.06499999761581421
+  ],
+  "layout": "(1,1,D,H,W) with D=z,H=y,W=x",
+  "method": "kaolin occupancy + sampled surface points + chunked cdist; signed by occupancy",
+  "cfg": {
+    "input": {
+      "obj_path": "/home/omey/abhay_ws/contact-manifold-state-estimation/data_generation/assets/meshes/extrusion_peg/extrusion_peg.obj"
+    },
+    "device": "cuda",
+    "dtype": "float32",
+    "seed": 0,
+    "sdf_grid": {
+      "resolution": 256,
+      "surface_samples": 65536,
+      "cdist_chunk": 2000,
+      "workspace_margin": 0.02
+    },
+    "viz": {
+      "gif_name": "extrusion_peg_sdf_z_sweep.gif",
+      "gif_fps": 24,
+      "frame_repeat": 2,
+      "boomerang": true,
+      "boomerang_hold": 4,
+      "num_slices": 120,
+      "max_abs_sdf": null,
+      "show_zero_contour": true,
+      "contour_linewidth": 1.0,
+      "geom_scatter_stride": 1,
+      "geom_point_size": 0.15,
+      "figsize": [
+        10.5,
+        4.8
+      ],
+      "dpi": 140
+    },
+    "output": {
+      "subdir": "sdf_voxel",
+      "npz_name": "sdf_volume.npz",
+      "meta_name": "sdf_meta.json"
+    }
+  }
+}
