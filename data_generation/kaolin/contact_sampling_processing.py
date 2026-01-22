@@ -15,8 +15,13 @@ Outputs:
     * contact+fine
 - 2x3 histogram figure (tx,ty,tz,rx,ry,rz):
     overlays contact-all vs contact-coarse vs contact-fine
-- Optional 3 rotating 3D point-cloud GIFs (translation space) colored by rotation
-  dimensions, adapted from data_visualization.py
+- Optional rotating 3D point-cloud GIFs:
+    * (tx, ty, tz) colored by rx/ry/rz (original)
+    * (r, theta, z) where r=sqrt(tx^2+ty^2), theta is polar angle w.r.t. +z (rad), z=tz, colored by rz
+    * NEW user-requested views:
+        - (tx, ry_deg, tz) colored by rz_deg
+        - (ty, rx_deg, tz) colored by rz_deg
+        - (rx_deg, ry_deg, tz) colored by r_xy = sqrt(tx^2 + ty^2)
 """
 
 import os
@@ -31,6 +36,7 @@ matplotlib.use("Agg")  # NO GUI, NO Qt
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import seaborn as sns
+import pandas as pd  # Add at the top with other imports
 
 
 # ==========================
@@ -39,7 +45,10 @@ import seaborn as sns
 
 CONFIG: Dict[str, Any] = {
     # Input sampling output (.csv or .npz)
-    "data_path": "/home/rp/abhay_ws/contact-manifold-state-estimation/data_generation/data/cylinder_simple/cylinder_simple_contact_poses.csv",
+    # "data_path": "./data_generation/data/cylinder_simple/cylinder_simple_contact_poses.csv",
+    # "data_path": "./data_generation/data/cross_real/cross_real_contact_poses.csv",
+    # "data_path": "./data_generation/data/geometry00015/geometry00015_contact_poses.csv",
+    "data_path": "./data_generation/data/cylinder_keyway02/cylinder_keyway02_contact_poses.csv",
 
     # Histogram options
     "hist": {
@@ -56,10 +65,10 @@ CONFIG: Dict[str, Any] = {
         "enabled": True,
         # Which poses to visualize:
         #   "all" | "contact_all" | "contact_coarse" | "contact_fine"
-        "subset": "contact_fine",
+        "subset": "contact_all",
 
         # Downsample (random) before plotting/animating to keep GIF generation fast
-        "max_points": 20_000,
+        "max_points": 10_000,
         "random_seed": 42,
 
         # Output directory (default: alongside data_path)
@@ -178,20 +187,44 @@ def _normalize_vec3(x: Any, name: str) -> np.ndarray:
     raise ValueError(f"Unsupported {name} shape/dtype: shape={x.shape}, dtype={x.dtype}")
 
 
+
 def load_npz(path: str) -> Dict[str, Any]:
+    """
+    Supported NPZ formats:
+
+    1) "legacy/contact_sampling" format:
+        - t: (N,3)
+        - r_deg: (N,3) rotations in degrees
+        - fidelity: (N,) strings like {"coarse","fine"} (optional)
+        - contact_valid: (N,) bool/0-1 (optional)
+
+    2) "voxel_sdf sampler chunk" format:
+        - t: (N,3)
+        - r: (N,3) rotations in radians
+        - contact_valid: (N,) bool/0-1
+        - config_sdf, min_separation, max_penetration (optional)
+    """
     data = np.load(path, allow_pickle=True)
     keys = set(data.files)
 
-    if "t" not in keys or "r_deg" not in keys:
-        raise ValueError(f"NPZ must contain 't' and 'r_deg'. Found: {sorted(keys)}")
+    if "t" not in keys:
+        raise ValueError(f"NPZ must contain 't'. Found: {sorted(keys)}")
 
     t = _normalize_vec3(data["t"], "t")
-    r = _normalize_vec3(data["r_deg"], "r_deg")
 
-    if t.shape[0] != r.shape[0]:
-        raise ValueError(f"t and r_deg length mismatch: {t.shape[0]} vs {r.shape[0]}")
+    # rotations: accept r_deg (degrees) OR r (radians)
+    if "r_deg" in keys:
+        r_deg = _normalize_vec3(data["r_deg"], "r_deg")
+    elif "r" in keys:
+        r_rad = _normalize_vec3(data["r"], "r")
+        r_deg = np.rad2deg(r_rad)
+    else:
+        raise ValueError(f"NPZ must contain 'r_deg' (deg) or 'r' (rad). Found: {sorted(keys)}")
 
-    pose = np.concatenate([t, r], axis=1)  # (N,6)
+    if t.shape[0] != r_deg.shape[0]:
+        raise ValueError(f"t and rotation length mismatch: {t.shape[0]} vs {r_deg.shape[0]}")
+
+    pose = np.concatenate([t, r_deg], axis=1)  # (N,6) with rotations in degrees
     N = pose.shape[0]
 
     fidelity = data.get("fidelity", np.array(["unknown"] * N, dtype=object))
@@ -199,51 +232,88 @@ def load_npz(path: str) -> Dict[str, Any]:
 
     out = dict(
         N=N,
-        pose=pose,
+        pose=pose.astype(float, copy=False),
         fidelity=_as_fidelity_str(fidelity, N),
         contact_valid=_as_bool_mask(contact_valid, N),
     )
 
-    for k in ["config_sdf", "min_separation", "max_penetration"]:
+    for k in ["config_sdf", "min_separation", "max_penetration", "contact_band"]:
         if k in keys:
-            out[k] = np.asarray(data[k], dtype=float).reshape(-1)
+            out[k] = np.asarray(data[k]).reshape(-1)
 
     return out
 
 
 def load_csv(path: str) -> Dict[str, Any]:
+    """
+    Supported CSV formats:
+
+    A) "legacy/contact_sampling" CSV (expected by original script):
+        tx,ty,tz, rx_deg,ry_deg,rz_deg, fidelity, contact_valid, (optional metrics...)
+
+    B) "voxel_sdf sampler" CSV (from the SDF-based sampling script):
+        t1,t2,t3, r1,r2,r3, config_sdf, min_separation, max_penetration, contact_band, contact_valid
+        NOTE: r1,r2,r3 are in radians in the voxel sampler; we convert to degrees.
+    """
     arr = np.genfromtxt(path, delimiter=",", names=True, dtype=None, encoding=None)
     arr = np.atleast_1d(arr)
     colnames = set(arr.dtype.names or [])
 
-    required = {
-        "tx", "ty", "tz",
-        "rx_deg", "ry_deg", "rz_deg",
-        "fidelity",
-        "contact_valid",
-    }
-    missing = required - colnames
-    if missing:
-        raise ValueError(f"CSV missing columns: {sorted(missing)}. Found: {sorted(colnames)}")
+    # Case A: legacy columns
+    if {"tx", "ty", "tz", "rx_deg", "ry_deg", "rz_deg"}.issubset(colnames):
+        pose = np.stack(
+            [arr["tx"], arr["ty"], arr["tz"], arr["rx_deg"], arr["ry_deg"], arr["rz_deg"]],
+            axis=1,
+        ).astype(float)
+        N = pose.shape[0]
 
-    pose = np.stack(
-        [arr["tx"], arr["ty"], arr["tz"], arr["rx_deg"], arr["ry_deg"], arr["rz_deg"]],
-        axis=1,
-    ).astype(float)
-    N = pose.shape[0]
+        # fidelity may not exist in some older CSVs; default to unknown
+        fidelity = arr["fidelity"] if "fidelity" in colnames else np.array(["unknown"] * N, dtype=object)
+        contact_valid = arr["contact_valid"] if "contact_valid" in colnames else np.zeros((N,), dtype=np.uint8)
 
-    out = dict(
-        N=N,
-        pose=pose,
-        fidelity=_as_fidelity_str(arr["fidelity"], N),
-        contact_valid=_as_bool_mask(arr["contact_valid"], N),
+        out = dict(
+            N=N,
+            pose=pose,
+            fidelity=_as_fidelity_str(fidelity, N),
+            contact_valid=_as_bool_mask(contact_valid, N),
+        )
+
+        for k in ["config_sdf", "min_separation", "max_penetration", "contact_band"]:
+            if k in colnames:
+                out[k] = np.asarray(arr[k]).reshape(-1)
+
+        return out
+
+    # Case B: voxel_sdf sampler columns
+    required_b = {"t1", "t2", "t3", "r1", "r2", "r3", "contact_valid"}
+    if required_b.issubset(colnames):
+        t = np.stack([arr["t1"], arr["t2"], arr["t3"]], axis=1).astype(float)
+        r_rad = np.stack([arr["r1"], arr["r2"], arr["r3"]], axis=1).astype(float)
+        r_deg = np.rad2deg(r_rad)
+
+        pose = np.concatenate([t, r_deg], axis=1)
+        N = pose.shape[0]
+
+        out = dict(
+            N=N,
+            pose=pose,
+            fidelity=np.array(["unknown"] * N, dtype=object),  # voxel sampler doesn't produce coarse/fine
+            contact_valid=_as_bool_mask(arr["contact_valid"], N),
+        )
+
+        for k in ["config_sdf", "min_separation", "max_penetration", "contact_band"]:
+            if k in colnames:
+                out[k] = np.asarray(arr[k], dtype=float).reshape(-1)
+
+        return out
+
+    # Otherwise unknown CSV
+    raise ValueError(
+        "Unrecognized CSV schema. Found columns:\n"
+        f"{sorted(colnames)}\n\n"
+        "Expected either legacy columns (tx,ty,tz,rx_deg,ry_deg,rz_deg,...) "
+        "or voxel_sdf columns (t1,t2,t3,r1,r2,r3,contact_valid,...)."
     )
-
-    for k in ["config_sdf", "min_separation", "max_penetration"]:
-        if k in colnames:
-            out[k] = np.asarray(arr[k], dtype=float).reshape(-1)
-
-    return out
 
 
 # ==========================
@@ -396,6 +466,37 @@ def _equal_aspect_3d(ax, points_xyz: np.ndarray) -> None:
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
 
+def xyz_to_rtheta_z(points_xyz: np.ndarray) -> np.ndarray:
+    """
+    Convert Cartesian translation points (tx,ty,tz) -> (r, theta, z),
+    where:
+      r     = sqrt(tx^2 + ty^2)
+      theta = angle with respect to +z axis (polar angle, in radians)
+      z     = tz
+
+    points_xyz: (N,3) array of [tx, ty, tz]
+    returns: (N,3) array of [r, theta, z]
+    """
+    pts = np.asarray(points_xyz, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"points_xyz must be (N,3). Got {pts.shape}")
+
+    tx = pts[:, 0]
+    ty = pts[:, 1]
+    tz = pts[:, 2]
+
+    r = np.sqrt(tx**2 + ty**2)
+    norm = np.sqrt(tx**2 + ty**2 + tz**2)
+
+    # theta = arccos( z / ||(x,y,z)|| ), safely handling norm ~ 0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        cos_theta = np.where(norm > 0.0, tz / norm, 1.0)
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        theta = np.arccos(cos_theta)  # radians
+
+    return np.stack([r, theta, tz], axis=1)
+
+
 def create_rotating_gif(
     points_xyz: np.ndarray,
     colors: np.ndarray,
@@ -409,11 +510,19 @@ def create_rotating_gif(
     point_size: float,
     alpha: float,
     cmap: str,
+    x_label: str = "X",
+    y_label: str = "Y",
+    z_label: str = "Z",
+    title_prefix: str = "Point cloud (translation)",
+    equal_aspect: bool = True, 
 ) -> None:
     """
     Adapted from data_visualization.py:
     - Rotating 3D scatter with colorbar
     - Saved as GIF using pillow writer
+
+    x_label, y_label, z_label, and title_prefix allow reuse for different
+    coordinate parameterizations (e.g., (r, theta, z)).
     """
     points = np.asarray(points_xyz, dtype=float)
     colors = np.asarray(colors, dtype=float).reshape(-1)
@@ -433,13 +542,14 @@ def create_rotating_gif(
         s=point_size,
         alpha=alpha,
     )
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title(f"Point cloud (translation) - colored by {color_label}")
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_zlabel(z_label)
+    ax.set_title(f"{title_prefix} - colored by {color_label}")
     plt.colorbar(sc, ax=ax, label=color_label)
 
-    _equal_aspect_3d(ax, points)
+    if equal_aspect:
+        _equal_aspect_3d(ax, points)
 
     def animate(frame_idx: int):
         ax.view_init(elev=elev, azim=frame_idx * deg_per_frame)
@@ -468,12 +578,16 @@ def maybe_make_rotation_gifs(
     cfg: Dict[str, Any],
 ) -> None:
     """
-    Create 3 GIFs:
+    Create 3 GIFs in (tx,ty,tz) space:
       - colored by rx_deg
       - colored by ry_deg
       - colored by rz_deg
 
-    Uses translation coordinates (tx,ty,tz) as the 3D point locations.
+    And an additional GIF in (r, theta, z) space:
+      - (r, theta, z) where r = sqrt(tx^2 + ty^2),
+        theta = angle w.r.t. +z axis (radians),
+        z = tz
+      - colored by rz_deg
     """
     points = pose[subset_mask, :3]
     rots = pose[subset_mask, 3:6]
@@ -502,6 +616,7 @@ def maybe_make_rotation_gifs(
     alpha = float(cfg["alpha"])
     cmap = str(cfg["cmap"])
 
+    # --- Original XYZ-based GIFs ---
     create_rotating_gif(
         points_xyz=points,
         colors=rots[:, 0],
@@ -515,6 +630,11 @@ def maybe_make_rotation_gifs(
         point_size=point_size,
         alpha=alpha,
         cmap=cmap,
+        x_label="tx",
+        y_label="ty",
+        z_label="tz",
+        title_prefix="Point cloud (tx, ty, tz)",
+        equal_aspect=True,
     )
     create_rotating_gif(
         points_xyz=points,
@@ -529,6 +649,11 @@ def maybe_make_rotation_gifs(
         point_size=point_size,
         alpha=alpha,
         cmap=cmap,
+        x_label="tx",
+        y_label="ty",
+        z_label="tz",
+        title_prefix="Point cloud (tx, ty, tz)",
+        equal_aspect=True,
     )
     create_rotating_gif(
         points_xyz=points,
@@ -543,7 +668,139 @@ def maybe_make_rotation_gifs(
         point_size=point_size,
         alpha=alpha,
         cmap=cmap,
+        x_label="tx",
+        y_label="ty",
+        z_label="tz",
+        title_prefix="Point cloud (tx, ty, tz)",
+        equal_aspect=True,
     )
+
+    # --- NEW: (r, theta, z)-based GIF ---
+    points_rtz = xyz_to_rtheta_z(points)
+    create_rotating_gif(
+        points_xyz=points_rtz,
+        colors=rots[:, 2],  # color by rz_deg for consistency
+        color_label="rz_deg",
+        out_path=os.path.join(vis_dir, f"{prefix}_pointcloud_rtheta_z.gif"),
+        frames=frames,
+        deg_per_frame=deg_per_frame,
+        elev=elev,
+        interval_ms=interval_ms,
+        fps=fps,
+        point_size=point_size,
+        alpha=alpha,
+        cmap=cmap,
+        x_label="r = sqrt(tx^2 + ty^2)",
+        y_label="theta (rad, w.r.t. +z)",
+        z_label="z = tz",
+        title_prefix="Point cloud (r, theta, z)",
+        equal_aspect=False,
+    )
+
+
+    # --- NEW: User-requested mixed translation/rotation views ---
+    # 1) X / RY / Z | colored by RZ
+    pts_x_ry_z = np.stack([points[:, 0], rots[:, 1], points[:, 2]], axis=1)
+    create_rotating_gif(
+        points_xyz=pts_x_ry_z,
+        colors=rots[:, 2],  # rz_deg
+        color_label="rz_deg",
+        out_path=os.path.join(vis_dir, f"{prefix}_pointcloud_x_ry_z__c_rz.gif"),
+        frames=frames,
+        deg_per_frame=deg_per_frame,
+        elev=elev,
+        interval_ms=interval_ms,
+        fps=fps,
+        point_size=point_size,
+        alpha=alpha,
+        cmap=cmap,
+        x_label="tx",
+        y_label="ry_deg",
+        z_label="tz",
+        title_prefix="Point cloud (tx, ry_deg, tz)",
+        equal_aspect=False,  # mixed units
+    )
+
+    # 2) Y / RX / Z | colored by RZ
+    pts_y_rx_z = np.stack([points[:, 1], rots[:, 0], points[:, 2]], axis=1)
+    create_rotating_gif(
+        points_xyz=pts_y_rx_z,
+        colors=rots[:, 2],  # rz_deg
+        color_label="rz_deg",
+        out_path=os.path.join(vis_dir, f"{prefix}_pointcloud_y_rx_z__c_rz.gif"),
+        frames=frames,
+        deg_per_frame=deg_per_frame,
+        elev=elev,
+        interval_ms=interval_ms,
+        fps=fps,
+        point_size=point_size,
+        alpha=alpha,
+        cmap=cmap,
+        x_label="ty",
+        y_label="rx_deg",
+        z_label="tz",
+        title_prefix="Point cloud (ty, rx_deg, tz)",
+        equal_aspect=False,  # mixed units
+    )
+
+    # 3) RX / RY / Z | colored by R (euclidean distance in x-y)
+    r_xy = np.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
+    pts_rx_ry_z = np.stack([rots[:, 0], rots[:, 1], points[:, 2]], axis=1)
+    create_rotating_gif(
+        points_xyz=pts_rx_ry_z,
+        colors=r_xy,
+        color_label="r_xy = sqrt(tx^2 + ty^2)",
+        out_path=os.path.join(vis_dir, f"{prefix}_pointcloud_rx_ry_z__c_rxy.gif"),
+        frames=frames,
+        deg_per_frame=deg_per_frame,
+        elev=elev,
+        interval_ms=interval_ms,
+        fps=fps,
+        point_size=point_size,
+        alpha=alpha,
+        cmap=cmap,
+        x_label="rx_deg",
+        y_label="ry_deg",
+        z_label="tz",
+        title_prefix="Point cloud (rx_deg, ry_deg, tz)",
+        equal_aspect=False,  # mixed units
+    )
+
+
+def save_contact_poses_csv(
+    pose: np.ndarray,
+    contact_mask: np.ndarray,
+    out_dir: str,
+    base: str,
+) -> None:
+    """
+    Save a CSV of only the contact poses with columns:
+    x, y, z (in mm), a, b, c (rotations in degrees: rz_deg, ry_deg, rx_deg)
+    """
+    contact_poses = pose[contact_mask]
+    if contact_poses.shape[0] == 0:
+        print("\n[contact_csv] No contact poses to save.")
+        return
+
+    # Convert tx,ty,tz from meters to mm
+    xyz_mm = contact_poses[:, :3] * 1000.0
+    # rx_deg, ry_deg, rz_deg as c, b, a
+    c = contact_poses[:, 3]
+    b = contact_poses[:, 4]
+    a = contact_poses[:, 5]
+
+    df = pd.DataFrame({
+        "x": xyz_mm[:, 0],
+        "y": xyz_mm[:, 1],
+        "z": xyz_mm[:, 2],
+        "a": a,
+        "b": b,
+        "c": c,
+    })
+
+    out_path = os.path.join(out_dir, f"{base}_contact_only_xyzabc.csv")
+    df.to_csv(out_path, index=False)
+    print(f"\nSaved contact poses CSV: {out_path}")
 
 
 def main() -> None:
@@ -559,6 +816,9 @@ def main() -> None:
         data = load_csv(data_path)
     else:
         raise ValueError("CONFIG['data_path'] must end in .csv or .npz")
+
+    # randomly downsample data 
+
 
     N = int(data["N"])
     pose = np.asarray(data["pose"], dtype=float)
@@ -672,6 +932,15 @@ def main() -> None:
             prefix=str(prefix),
             cfg=gif_cfg,
         )
+
+    # Save contact poses CSV (NEW)
+    save_contact_poses_csv(
+        pose=pose,
+        contact_mask=contact_valid,
+        out_dir=out_dir,
+        base=base,
+    )
+
 
     print("\n========================================")
     print("Done.")

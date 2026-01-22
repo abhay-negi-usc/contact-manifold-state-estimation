@@ -21,8 +21,9 @@ import csv
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional, Any
 from tqdm import tqdm  # added
-
+from itertools import product
 import torch
+import random
 
 # Kaolin
 import kaolin as kal
@@ -37,6 +38,64 @@ CONFIG_PATH: Optional[str] = "./data_generation/kaolin/contact_sampling_config.p
 # Mesh + math helpers
 # -----------------------------
 
+def split_cell_at_zero_if_straddling(cell: Cell6D) -> List[Cell6D]:
+    cells = [cell]
+    for k in range(3):
+        new_cells = []
+        for c in cells:
+            if (c.rmin[k] < 0.0) and (c.rmax[k] > 0.0):
+                c1 = Cell6D(c.tmin.clone(), c.tmax.clone(), c.rmin.clone(), c.rmax.clone(), c.score)
+                c2 = Cell6D(c.tmin.clone(), c.tmax.clone(), c.rmin.clone(), c.rmax.clone(), c.score)
+                c1.rmax[k] = 0.0
+                c2.rmin[k] = 0.0
+                new_cells.extend([c1, c2])
+            else:
+                new_cells.append(c)
+        cells = new_cells
+    return cells
+
+def make_probes_in_cell(cell, Bp, device, rng, structured_max=32):
+    # random probes
+    t_rand, r_rand = sample_pose_in_cell(cell, Bp, device, rng)
+
+    # structured rotation probes (corners + mid), translation at cell center
+    t_mid = 0.5 * (cell.tmin.to(device) + cell.tmax.to(device))
+    rmin = cell.rmin.to(device)
+    rmax = cell.rmax.to(device)
+
+    corners = torch.tensor(list(product([0.0, 1.0], repeat=3)), device=device)  # (8,3)
+    r_corners = rmin + corners * (rmax - rmin)                                  # (8,3)
+    r_mid = (0.5 * (rmin + rmax)).unsqueeze(0)
+
+    r_struct = torch.cat([r_corners, r_mid], dim=0)
+
+    # If cell straddles 0 on any axis, also test that 0-slice explicitly
+    for k in range(3):
+        if (rmin[k] < 0.0) and (rmax[k] > 0.0):
+            rz = 0.5 * (rmin + rmax)
+            rz[k] = 0.0
+            r_struct = torch.cat([r_struct, rz.unsqueeze(0)], dim=0)
+
+    # cap structured probes so they don't explode
+    if r_struct.shape[0] > structured_max:
+        r_struct = r_struct[:structured_max]
+
+    t_struct = t_mid.unsqueeze(0).expand(r_struct.shape[0], 3)
+
+    # overwrite the first K random samples with structured ones (if room)
+    # K = min(Bp, r_struct.shape[0])
+    # t_rand[:K] = t_struct[:K]
+    # r_rand[:K] = r_struct[:K]
+
+    # how many structured rotations we *want* to inject
+    K_desired = min(r_struct.shape[0], max(1, Bp // 4))  # e.g., 25% structured
+    # but we can never inject more than Bp
+    K = min(Bp, K_desired)
+
+    r_rand[:K] = r_struct[:K]   # safe now
+    # t_rand stays random
+
+    return t_rand, r_rand
 
 def batch_face_vertices(verts: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
     """Return per-face vertices: (B,F,3,3) from verts (B,V,3) and faces (F,3) or (B,F,3)."""
@@ -579,7 +638,7 @@ def main():
         rmax=to_tensor3(bounds["rmax"]),
         score=0.0
     )
-    queue: List[Cell6D] = [root]
+    queue: List[Cell6D] = split_cell_at_zero_if_straddling(root)
 
     rng = torch.Generator(device=device)
     rng.manual_seed(seed + 999)
@@ -615,12 +674,23 @@ def main():
             if csv_out:
                 print(f"  -> flushed CSV at {written} rows: {csv_out}")
 
-    while queue and written < budget:
-        queue.sort(key=lambda c: c.score)
-        cell = queue.pop(0)
+    explore_prob = float(sampling.get("explore_prob", 0.10))  # 10% random by default
 
+    while queue and written < budget:
+        # ----------------------------
+        # Pick cell
+        # ----------------------------
+        if random.random() < explore_prob:
+            cell = queue.pop(random.randrange(len(queue)))   # explore
+        else:
+            queue.sort(key=lambda c: c.score)
+            cell = queue.pop(0)                              # exploit
+
+        # ----------------------------
+        # Probe
+        # ----------------------------
         Bp = min(probe_per_cell, budget - written)
-        t_probe, r_probe = sample_pose_in_cell(cell, Bp, device, rng)
+        t_probe, r_probe = make_probes_in_cell(cell, Bp, device, rng)
 
         metrics_probe = evaluate_batch(
             static_verts, static_faces,
@@ -630,41 +700,59 @@ def main():
             t_probe, r_probe
         )
 
-        # CPU for IO
+        # CPU for IO / cheap masks
         t_cpu = t_probe.detach().cpu()
         r_cpu = r_probe.detach().cpu()
         csdf_cpu = metrics_probe["config_sdf"].detach().cpu()
         minsep_cpu = metrics_probe["min_separation"].detach().cpu()
         maxpen_cpu = metrics_probe["max_penetration"].detach().cpu()
 
-        rows_buffer.extend(tensors_to_csv_rows(
-            t_cpu, r_cpu, csdf_cpu, minsep_cpu, maxpen_cpu,
-            near_thresh=near_thresh, epsilon_pen=epsilon_pen,
-            fidelity="coarse"
-        ))
-
-        if write_npz:
-            out_t.append(t_cpu); out_r.append(r_cpu)
-            out_csdf.append(csdf_cpu); out_minsep.append(minsep_cpu); out_maxpen.append(maxpen_cpu)
-            out_fid.extend(["coarse"] * t_cpu.shape[0])
-
-        written += Bp
-        pbar.update(Bp) 
-        do_print()
-        do_flush()
-
-        if written >= budget:
-            break
-
+        # ----------------------------
+        # FIX 2: filter BEFORE writing
+        # ----------------------------
         abs_csdf = csdf_cpu.abs()
+        contact_band = (abs_csdf <= near_thresh)
+        contact_valid = contact_band & (maxpen_cpu <= epsilon_pen)
+
+        keep_idx = torch.nonzero(contact_valid).squeeze(1)
+
+        # Write ONLY kept rows (CSV + NPZ)
+        kept = int(keep_idx.numel())
+        if kept > 0:
+            rows_buffer.extend(tensors_to_csv_rows(
+                t_cpu[keep_idx], r_cpu[keep_idx],
+                csdf_cpu[keep_idx], minsep_cpu[keep_idx], maxpen_cpu[keep_idx],
+                near_thresh=near_thresh, epsilon_pen=epsilon_pen,
+                fidelity="coarse"
+            ))
+
+            if write_npz:
+                out_t.append(t_cpu[keep_idx]); out_r.append(r_cpu[keep_idx])
+                out_csdf.append(csdf_cpu[keep_idx]); out_minsep.append(minsep_cpu[keep_idx]); out_maxpen.append(maxpen_cpu[keep_idx])
+                out_fid.extend(["coarse"] * kept)
+
+            written += kept
+            pbar.update(kept)
+            do_print()
+            do_flush()
+
+            if written >= budget:
+                break
+
+        # ----------------------------
+        # Queue refinement logic (do NOT depend on kept)
+        # ----------------------------
         far_mask = (abs_csdf > far_thresh) & (minsep_cpu > far_thresh) & (maxpen_cpu == 0.0)
-        near_mask = (abs_csdf < near_thresh) | (maxpen_cpu > 0.0)
+        near_mask = (abs_csdf < near_thresh) | (minsep_cpu < near_thresh) | (maxpen_cpu > 0.0)
 
-        cell_score = float(torch.min(abs_csdf).item())
+        # cell score: best "closeness" in this batch
+        cell_score = float(torch.min(torch.minimum(abs_csdf, minsep_cpu)).item())
 
+        # If everything far, no need to subdivide
         if torch.all(far_mask).item():
             continue
 
+        # If anything near, subdivide and optionally do fine sampling
         if torch.any(near_mask).item():
             c1, c2 = subdivide_cell(cell)
             c1.score = cell_score
@@ -672,21 +760,25 @@ def main():
             queue.append(c1)
             queue.append(c2)
 
+            # ----------------------------
+            # Fine refinement
+            # ----------------------------
             if enable_fine and written < budget:
                 very_near = (abs_csdf < (very_near_factor * near_thresh)) | (maxpen_cpu > 0.0)
                 idx = torch.nonzero(very_near).squeeze(1)
 
                 if idx.numel() > 0:
-                    # limit fine rows if counting toward budget
+                    # cap fine batch
                     if count_fine:
                         nf = min(int(idx.numel()), budget - written)
                         idx = idx[:nf]
                     else:
-                        # still cap to avoid absurd bursts
                         idx = idx[:min(int(idx.numel()), gpu_batch)]
 
-                    tf = t_probe[idx.to(device)]
-                    rf = r_probe[idx.to(device)]
+                    # gather fine candidates back on device
+                    idx_dev = idx.to(device)
+                    tf = t_probe[idx_dev]
+                    rf = r_probe[idx_dev]
 
                     metrics_fine = evaluate_batch(
                         static_verts, static_faces,
@@ -702,24 +794,34 @@ def main():
                     minsep_f = metrics_fine["min_separation"].detach().cpu()
                     maxpen_f = metrics_fine["max_penetration"].detach().cpu()
 
-                    rows_buffer.extend(tensors_to_csv_rows(
-                        tf_cpu, rf_cpu, csdf_f, minsep_f, maxpen_f,
-                        near_thresh=near_thresh, epsilon_pen=epsilon_pen,
-                        fidelity="fine"
-                    ))
+                    abs_csdf_f = csdf_f.abs()
+                    contact_band_f = (abs_csdf_f <= near_thresh)
+                    contact_valid_f = contact_band_f & (maxpen_f <= epsilon_pen)
+                    keep_idx_f = torch.nonzero(contact_valid_f).squeeze(1)
 
-                    if write_npz:
-                        out_t.append(tf_cpu); out_r.append(rf_cpu)
-                        out_csdf.append(csdf_f); out_minsep.append(minsep_f); out_maxpen.append(maxpen_f)
-                        out_fid.extend(["fine"] * tf_cpu.shape[0])
+                    kept_f = int(keep_idx_f.numel())
+                    if kept_f > 0:
+                        rows_buffer.extend(tensors_to_csv_rows(
+                            tf_cpu[keep_idx_f], rf_cpu[keep_idx_f],
+                            csdf_f[keep_idx_f], minsep_f[keep_idx_f], maxpen_f[keep_idx_f],
+                            near_thresh=near_thresh, epsilon_pen=epsilon_pen,
+                            fidelity="fine"
+                        ))
 
-                    if count_fine:
-                        written += tf_cpu.shape[0]
-                        do_print()
-                        do_flush()
+                        if write_npz:
+                            out_t.append(tf_cpu[keep_idx_f]); out_r.append(rf_cpu[keep_idx_f])
+                            out_csdf.append(csdf_f[keep_idx_f]); out_minsep.append(minsep_f[keep_idx_f]); out_maxpen.append(maxpen_f[keep_idx_f])
+                            out_fid.extend(["fine"] * kept_f)
 
-                    if written >= budget:
-                        break
+                        if count_fine:
+                            written += kept_f
+                            pbar.update(kept_f)
+                            do_print()
+                            do_flush()
+
+                            if written >= budget:
+                                break
+
 
     pbar.close() 
 
